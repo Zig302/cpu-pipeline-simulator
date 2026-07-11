@@ -1,0 +1,332 @@
+#include "cpulab/core.hpp"
+
+#include <algorithm>
+#include <bitset>
+#include <charconv>
+#include <cctype>
+#include <cstring>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+
+namespace cpulab {
+namespace {
+
+int32_t signExtend(uint32_t v, unsigned bits) {
+  const uint32_t mask = 1u << (bits - 1u);
+  return static_cast<int32_t>((v ^ mask) - mask);
+}
+
+std::string upper(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return static_cast<char>(std::toupper(c)); });
+  return s;
+}
+
+std::string trim(const std::string& s) {
+  const auto first = s.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return {};
+  return s.substr(first, s.find_last_not_of(" \t\r\n") - first + 1);
+}
+
+std::string stripComment(const std::string& s) {
+  auto p = s.find('#');
+  auto q = s.find("//");
+  auto end = std::min(p == std::string::npos ? s.size() : p, q == std::string::npos ? s.size() : q);
+  return s.substr(0, end);
+}
+
+std::vector<std::string> tokens(std::string s) {
+  for (char& c : s) if (c == ',' || c == '(' || c == ')') c = ' ';
+  std::istringstream in(s);
+  std::vector<std::string> out;
+  for (std::string t; in >> t;) out.push_back(t);
+  return out;
+}
+
+bool parseInteger(const std::string& token, int64_t& result) {
+  try {
+    size_t used = 0;
+    int base = 10;
+    std::string s = token;
+    bool neg = !s.empty() && s[0] == '-';
+    size_t prefix = neg ? 1 : 0;
+    if (s.size() > prefix + 2 && s[prefix] == '0' && (s[prefix+1] == 'x' || s[prefix+1] == 'X')) base = 16;
+    result = std::stoll(s, &used, base);
+    return used == s.size();
+  } catch (...) { return false; }
+}
+
+bool parseReg(const std::string& t, uint8_t& r) {
+  if (t.size() < 2 || (t[0] != 'r' && t[0] != 'R')) return false;
+  int64_t n = 0;
+  if (!parseInteger(t.substr(1), n) || n < 0 || n > 31) return false;
+  r = static_cast<uint8_t>(n); return true;
+}
+
+std::string jsonEscape(const std::string& s) {
+  std::ostringstream out;
+  for (unsigned char c : s) {
+    switch (c) {
+      case '"': out << "\\\""; break; case '\\': out << "\\\\"; break;
+      case '\n': out << "\\n"; break; case '\r': out << "\\r"; break; case '\t': out << "\\t"; break;
+      default: if (c < 32) out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << int(c) << std::dec; else out << c;
+    }
+  }
+  return out.str();
+}
+
+uint32_t readLE(const std::vector<uint8_t>& mem, uint32_t a) {
+  return uint32_t(mem[a]) | (uint32_t(mem[a+1]) << 8) | (uint32_t(mem[a+2]) << 16) | (uint32_t(mem[a+3]) << 24);
+}
+
+void writeLE(std::vector<uint8_t>& mem, uint32_t a, uint32_t v) {
+  mem[a] = uint8_t(v); mem[a+1] = uint8_t(v >> 8); mem[a+2] = uint8_t(v >> 16); mem[a+3] = uint8_t(v >> 24);
+}
+
+bool writes(const PipelineSlot& s, uint8_t reg) { return s.valid && s.decoded.writesRd && s.decoded.rd == reg && reg != 0; }
+
+std::string forwardingName(ForwardingMode m) {
+  return m == ForwardingMode::Full ? "full" : m == ForwardingMode::None ? "none" : "manual";
+}
+std::string predictorName(PredictorMode m) {
+  switch (m) { case PredictorMode::AlwaysNotTaken: return "always-not-taken"; case PredictorMode::AlwaysTaken: return "always-taken"; case PredictorMode::OneBit: return "one-bit"; default: return "two-bit"; }
+}
+
+}  // namespace
+
+std::string opName(Op op) {
+  static const char* names[] = {"NOP","ADD","SUB","MUL","ADDI","AND","OR","XOR","SLL","SRL","SLT","LW","SW","BEQ","BNE","BLT","J","JAL","JR","LUI","HALT"};
+  const auto v = static_cast<unsigned>(op);
+  return v <= static_cast<unsigned>(Op::HALT) ? names[v] : "INVALID";
+}
+
+uint32_t encodeR(Op op, uint8_t rd, uint8_t rs1, uint8_t rs2) {
+  return (uint32_t(op) << 26) | (uint32_t(rd) << 21) | (uint32_t(rs1) << 16) | (uint32_t(rs2) << 11);
+}
+uint32_t encodeI(Op op, uint8_t rd, uint8_t rs1, int32_t imm) {
+  return (uint32_t(op) << 26) | (uint32_t(rd) << 21) | (uint32_t(rs1) << 16) | (uint32_t(imm) & 0xffffu);
+}
+uint32_t encodeB(Op op, uint8_t rs1, uint8_t rs2, int32_t off) {
+  return (uint32_t(op) << 26) | (uint32_t(rs1) << 21) | (uint32_t(rs2) << 16) | (uint32_t(off) & 0xffffu);
+}
+uint32_t encodeJ(Op op, uint8_t rd, int32_t off) {
+  return (uint32_t(op) << 26) | (uint32_t(rd) << 21) | (uint32_t(off) & 0x1fffffu);
+}
+
+Decoded decode(uint32_t word) {
+  Decoded d; d.op = static_cast<Op>((word >> 26) & 0x3f);
+  d.rd = uint8_t((word >> 21) & 31); d.rs1 = uint8_t((word >> 16) & 31); d.rs2 = uint8_t((word >> 11) & 31);
+  switch (d.op) {
+    case Op::ADD: case Op::SUB: case Op::MUL: case Op::AND: case Op::OR: case Op::XOR: case Op::SLL: case Op::SRL: case Op::SLT:
+      d.usesRs1 = d.usesRs2 = d.writesRd = true; break;
+    case Op::ADDI: d.imm = signExtend(word & 0xffff,16); d.usesRs1 = d.writesRd = true; break;
+    case Op::LW: d.imm = signExtend(word & 0xffff,16); d.usesRs1 = d.writesRd = d.isLoad = true; break;
+    case Op::SW: d.rs2 = d.rd; d.rd = 0; d.imm = signExtend(word & 0xffff,16); d.usesRs1 = d.usesRs2 = d.isStore = true; break;
+    case Op::BEQ: case Op::BNE: case Op::BLT:
+      d.rs1 = uint8_t((word >> 21) & 31); d.rs2 = uint8_t((word >> 16) & 31); d.rd = 0; d.imm = signExtend(word & 0xffff,16) * 4; d.usesRs1 = d.usesRs2 = d.isBranch = true; break;
+    case Op::J: d.rd = 0; d.imm = signExtend(word & 0x1fffff,21) * 4; d.isJump = true; break;
+    case Op::JAL: d.imm = signExtend(word & 0x1fffff,21) * 4; d.isJump = d.writesRd = true; break;
+    case Op::JR: d.rs1 = uint8_t((word >> 21) & 31); d.rd = 0; d.usesRs1 = d.isJump = true; break;
+    case Op::LUI: d.imm = int32_t((word & 0xffff) << 16); d.writesRd = true; break;
+    case Op::NOP: case Op::HALT: break;
+    default: d.op = Op::INVALID; break;
+  }
+  return d;
+}
+
+Program Assembler::assemble(const std::string& source) const {
+  Program p;
+  struct Line { int number; std::string text; std::vector<std::string> tok; uint32_t pc; };
+  std::vector<Line> lines;
+  std::istringstream input(source);
+  std::string raw; int lineNo = 0; uint32_t pc = 0;
+  while (std::getline(input, raw)) {
+    ++lineNo; std::string clean = trim(stripComment(raw));
+    if (clean.empty()) continue;
+    auto colon = clean.find(':');
+    if (colon != std::string::npos) {
+      std::string label = trim(clean.substr(0,colon));
+      if (label.empty() || !(std::isalpha(static_cast<unsigned char>(label[0])) || label[0] == '_') ||
+          !std::all_of(label.begin()+1,label.end(),[](unsigned char c){return std::isalnum(c)||c=='_';})) {
+        p.errors.push_back({lineNo,1,"Invalid label name"});
+      } else if (p.labels.count(label)) p.errors.push_back({lineNo,1,"Duplicate label '"+label+"'"});
+      else p.labels[label] = pc;
+      clean = trim(clean.substr(colon+1));
+      if (clean.empty()) continue;
+    }
+    auto tok = tokens(clean);
+    uint32_t count = 1;
+    if (!tok.empty() && upper(tok[0]) == "LI" && tok.size() == 3) {
+      int64_t v=0; if (parseInteger(tok[2],v) && (v < -32768 || v > 32767)) count=2;
+    }
+    lines.push_back({lineNo,clean,tok,pc}); pc += count*4;
+  }
+
+  auto err = [&](int line, const std::string& msg){ p.errors.push_back({line,1,msg}); };
+  auto imm = [&](const std::string& t, int line, int64_t lo, int64_t hi, int64_t& v)->bool {
+    if (!parseInteger(t,v)) { err(line,"Invalid integer literal '"+t+"'"); return false; }
+    if (v<lo||v>hi) { err(line,"Immediate "+t+" is outside ["+std::to_string(lo)+", "+std::to_string(hi)+"]"); return false; } return true;
+  };
+  auto target = [&](const std::string& t,int line,uint32_t at,unsigned bits,int32_t& off)->bool {
+    auto it=p.labels.find(t); int64_t addr=0;
+    if(it!=p.labels.end()) addr=it->second; else if(!parseInteger(t,addr)){err(line,"Unknown label '"+t+"'");return false;}
+    if((addr&3)!=0){err(line,"Branch target must be 4-byte aligned");return false;}
+    int64_t words=(addr-int64_t(at+4))/4; int64_t lo=-(int64_t(1)<<(bits-1)), hi=(int64_t(1)<<(bits-1))-1;
+    if(words<lo||words>hi){err(line,"Control-flow target is out of range");return false;} off=int32_t(words);return true;
+  };
+  auto emit = [&](uint32_t w,const std::string& text,int line){p.words.push_back(w);p.assembly.push_back(text);p.sourceLines.push_back(line);};
+
+  for (const auto& ln : lines) {
+    auto t=ln.tok; if(t.empty()) continue; std::string op=upper(t[0]); uint8_t a=0,b=0,c=0; int64_t v=0; int32_t off=0;
+    auto count=[&](size_t n)->bool{if(t.size()!=n){err(ln.number,op+" expects "+std::to_string(n-1)+" operand(s), got "+std::to_string(t.size()-1));return false;}return true;};
+    auto reg=[&](size_t i,uint8_t& r)->bool{if(!parseReg(t[i],r)){err(ln.number,"Invalid register '"+t[i]+"'; expected r0 through r31");return false;}return true;};
+    auto r3=[&](){return count(4)&&reg(1,a)&&reg(2,b)&&reg(3,c);};
+    auto rri=[&](){return count(4)&&reg(1,a)&&reg(2,b)&&imm(t[3],ln.number,-32768,32767,v);};
+    if(op=="LI") { if(!count(3)||!reg(1,a)||!imm(t[2],ln.number,std::numeric_limits<int32_t>::min(),std::numeric_limits<uint32_t>::max(),v)) continue; uint32_t u=uint32_t(v); if(int64_t(int32_t(u))>=-32768&&int64_t(int32_t(u))<=32767) emit(encodeI(Op::ADDI,a,0,int16_t(u)),"ADDI r"+std::to_string(a)+", r0, "+std::to_string(int16_t(u)),ln.number); else { uint32_t hi=(u+0x8000u)>>16; int16_t lo=int16_t(u); emit(encodeI(Op::LUI,a,0,int32_t(hi&0xffff)),"LUI r"+std::to_string(a)+", "+std::to_string(hi&0xffff),ln.number); emit(encodeI(Op::ADDI,a,a,lo),"ADDI r"+std::to_string(a)+", r"+std::to_string(a)+", "+std::to_string(lo),ln.number);} continue; }
+    if(op=="MOV") { if(count(3)&&reg(1,a)&&reg(2,b)) emit(encodeI(Op::ADDI,a,b,0),ln.text,ln.number); continue; }
+    if(op=="B") op="J";
+    if(op=="RET") { if(count(1)) emit(encodeJ(Op::JR,31,0),ln.text,ln.number); continue; }
+    if(op=="NOP") { if(count(1)) emit(encodeR(Op::NOP,0,0,0),ln.text,ln.number); }
+    else if(op=="HALT") { if(count(1)) emit(encodeR(Op::HALT,0,0,0),ln.text,ln.number); }
+    else if(op=="ADD"||op=="SUB"||op=="MUL"||op=="AND"||op=="OR"||op=="XOR"||op=="SLL"||op=="SRL"||op=="SLT") { if(r3()){ static const std::map<std::string,Op> m={{"ADD",Op::ADD},{"SUB",Op::SUB},{"MUL",Op::MUL},{"AND",Op::AND},{"OR",Op::OR},{"XOR",Op::XOR},{"SLL",Op::SLL},{"SRL",Op::SRL},{"SLT",Op::SLT}};emit(encodeR(m.at(op),a,b,c),ln.text,ln.number);} }
+    else if(op=="ADDI") { if(rri()) emit(encodeI(Op::ADDI,a,b,int32_t(v)),ln.text,ln.number); }
+    else if(op=="LUI") { if(count(3)&&reg(1,a)&&imm(t[2],ln.number,-32768,65535,v)) emit(encodeI(Op::LUI,a,0,int32_t(v)),ln.text,ln.number); }
+    else if(op=="LW") { if(count(4)&&reg(1,a)&&imm(t[2],ln.number,-32768,32767,v)&&reg(3,b)) emit(encodeI(Op::LW,a,b,int32_t(v)),ln.text,ln.number); }
+    else if(op=="SW") { if(count(4)&&reg(1,a)&&imm(t[2],ln.number,-32768,32767,v)&&reg(3,b)) emit(encodeI(Op::SW,a,b,int32_t(v)),ln.text,ln.number); }
+    else if(op=="BEQ"||op=="BNE"||op=="BLT") { if(count(4)&&reg(1,a)&&reg(2,b)&&target(t[3],ln.number,ln.pc,16,off)){Op x=op=="BEQ"?Op::BEQ:op=="BNE"?Op::BNE:Op::BLT;emit(encodeB(x,a,b,off),ln.text,ln.number);} }
+    else if(op=="J") { if(count(2)&&target(t[1],ln.number,ln.pc,21,off)) emit(encodeJ(Op::J,0,off),ln.text,ln.number); }
+    else if(op=="JAL") { if(count(3)&&reg(1,a)&&target(t[2],ln.number,ln.pc,21,off)) emit(encodeJ(Op::JAL,a,off),ln.text,ln.number); }
+    else if(op=="JR") { if(count(2)&&reg(1,a)) emit(encodeJ(Op::JR,a,0),ln.text,ln.number); }
+    else err(ln.number,"Unknown instruction '"+t[0]+"'");
+  }
+  return p;
+}
+
+void BranchPredictor::reset(PredictorMode mode, uint32_t entries) { mode_=mode; table_.assign(std::max(1u,entries),{}); }
+bool BranchPredictor::predict(uint32_t pc) const {
+  if(mode_==PredictorMode::AlwaysNotTaken) return false; if(mode_==PredictorMode::AlwaysTaken) return true;
+  const auto& e=table_[(pc/4)%table_.size()]; if(!e.valid||e.tagPc!=pc) return false;
+  return mode_==PredictorMode::OneBit ? e.state!=0 : e.state>=2;
+}
+uint8_t BranchPredictor::state(uint32_t pc) const { const auto&e=table_[(pc/4)%table_.size()];return e.valid&&e.tagPc==pc?e.state:mode_==PredictorMode::TwoBit?1:0; }
+std::pair<uint8_t,uint8_t> BranchPredictor::update(uint32_t pc,bool taken) {
+  auto& e=table_[(pc/4)%table_.size()]; uint8_t before=state(pc); e.valid=true;e.tagPc=pc;e.recentTaken=taken;
+  if(mode_==PredictorMode::OneBit)e.state=taken?1:0; else if(mode_==PredictorMode::TwoBit)e.state=taken?std::min<int>(3,before+1):std::max<int>(0,before-1); else e.state=taken?3:0;
+  return {before,e.state};
+}
+
+void DataCache::reset(const Configuration& cfg) {
+  cfg_=cfg;stats_={};tick_=0; uint32_t ways=std::max(1u,cfg.cacheAssociativity), block=std::max(4u,cfg.cacheBlockSize), count=std::max(1u,cfg.cacheCapacity/(block*ways));
+  sets_.assign(count,std::vector<CacheLine>(ways)); for(auto& set:sets_)for(auto& line:set)line.data.assign(block,0);
+}
+CacheLine* DataCache::find(uint32_t a) { uint32_t block=a/cfg_.cacheBlockSize,set=block%sets_.size(),tag=block/sets_.size();for(auto&l:sets_[set])if(l.valid&&l.tag==tag)return &l;return nullptr; }
+uint32_t DataCache::beginAccess(uint32_t a,bool wr,std::vector<uint8_t>& mem) {
+  wr?++stats_.writes:++stats_.reads; ++tick_; if(auto*l=find(a)){++stats_.hits;l->lru=tick_;return std::max(1u,cfg_.cacheHitLatency);}
+  ++stats_.misses; uint32_t block=a/cfg_.cacheBlockSize,set=block%sets_.size(),tag=block/sets_.size(),base=(a/cfg_.cacheBlockSize)*cfg_.cacheBlockSize;
+  auto& ways=sets_[set]; auto* victim=&ways[0]; for(auto&l:ways)if(!l.valid){victim=&l;break;}else if(l.lru<victim->lru)victim=&l;
+  if(victim->valid&&victim->dirty){++stats_.dirtyWritebacks;uint32_t oldBase=((victim->tag*sets_.size())+set)*cfg_.cacheBlockSize;for(uint32_t i=0;i<cfg_.cacheBlockSize&&oldBase+i<mem.size();++i)mem[oldBase+i]=victim->data[i];}
+  victim->valid=true;victim->dirty=false;victim->tag=tag;victim->lru=tick_;for(uint32_t i=0;i<cfg_.cacheBlockSize;++i)victim->data[i]=(base+i<mem.size())?mem[base+i]:0;
+  uint32_t latency=std::max(1u,cfg_.cacheHitLatency)+cfg_.cacheMissPenalty;stats_.stallCycles+=latency-1;return latency;
+}
+uint32_t DataCache::readWord(uint32_t a) const { uint32_t block=a/cfg_.cacheBlockSize,set=block%sets_.size(),tag=block/sets_.size(),off=a%cfg_.cacheBlockSize;for(const auto&l:sets_[set])if(l.valid&&l.tag==tag)return uint32_t(l.data[off])|(uint32_t(l.data[off+1])<<8)|(uint32_t(l.data[off+2])<<16)|(uint32_t(l.data[off+3])<<24);return 0; }
+void DataCache::writeWord(uint32_t a,uint32_t v) { if(auto*l=find(a)){uint32_t o=a%cfg_.cacheBlockSize;l->data[o]=uint8_t(v);l->data[o+1]=uint8_t(v>>8);l->data[o+2]=uint8_t(v>>16);l->data[o+3]=uint8_t(v>>24);l->dirty=true;l->lru=++tick_;} }
+
+Simulator::Simulator(){ reset(); }
+std::string Simulator::assemble(const std::string& source) {
+  auto p=Assembler{}.assemble(source); std::ostringstream o;o<<"{\"ok\":"<<(p.ok()?"true":"false")<<",\"words\":[";for(size_t i=0;i<p.words.size();++i){if(i)o<<',';o<<p.words[i];}o<<"],\"sourceLines\":[";for(size_t i=0;i<p.sourceLines.size();++i){if(i)o<<',';o<<p.sourceLines[i];}o<<"],\"errors\":[";for(size_t i=0;i<p.errors.size();++i){if(i)o<<',';o<<"{\"line\":"<<p.errors[i].line<<",\"column\":"<<p.errors[i].column<<",\"message\":\""<<jsonEscape(p.errors[i].message)<<"\"}";}o<<"]}";return o.str();
+}
+bool Simulator::loadProgram(const std::string& source) { auto p=Assembler{}.assemble(source);if(!p.ok()){program_=std::move(p);source_=source;status_="assembly-error";return false;}program_=std::move(p);source_=source;reset();return true; }
+
+void Simulator::reset() {
+  regs_.fill(0); memory_.assign(std::max(1024u,cfg_.memoryBytes),0); regs_[29]=std::min<uint32_t>(cfg_.initialStackPointer,uint32_t(memory_.size()-4));pc_=0;nextId_=1;
+  ifid_={};idex_={};exmem1_={};mem1mem2_={};mem2wb_={};stats_={};events_.clear();timeline_.clear();history_.clear();breakpoints_.clear();halted_=fetchStopped_=faulted_=false;status_=program_.ok()?"ready":"assembly-error";memWait_=0;memAccessStarted_=false;
+  predictor_.reset(cfg_.predictor,cfg_.predictorEntries);cache_.reset(cfg_);
+  for(size_t i=0;i<program_.words.size();++i)writeLE(memory_,uint32_t(i*4),program_.words[i]);
+}
+void Simulator::resetWithJson(const std::string& j) {
+  auto has=[&](const std::string& s){return j.find(s)!=std::string::npos;};
+  if(has("\"forwarding\":\"none\""))cfg_.forwarding=ForwardingMode::None;else if(has("\"forwarding\":\"manual\""))cfg_.forwarding=ForwardingMode::Manual;else cfg_.forwarding=ForwardingMode::Full;
+  if(has("always-not-taken"))cfg_.predictor=PredictorMode::AlwaysNotTaken;else if(has("always-taken"))cfg_.predictor=PredictorMode::AlwaysTaken;else if(has("one-bit"))cfg_.predictor=PredictorMode::OneBit;else cfg_.predictor=PredictorMode::TwoBit;
+  cfg_.cacheEnabled=has("\"cacheEnabled\":true"); reset();
+}
+void Simulator::snapshot(){Snapshot s;s.regs=regs_;s.memory=memory_;s.pc=pc_;s.nextId=nextId_;s.ifid=ifid_;s.idex=idex_;s.exmem1=exmem1_;s.mem1mem2=mem1mem2_;s.mem2wb=mem2wb_;s.stats=stats_;s.predictor=predictor_;s.cache=cache_;s.halted=halted_;s.fetchStopped=fetchStopped_;s.faulted=faulted_;s.status=status_;s.memWait=memWait_;s.memAccessStarted=memAccessStarted_;s.timelineSize=timeline_.size();history_.push_back(std::move(s));if(history_.size()>500)history_.pop_front();}
+bool Simulator::restorePreviousCycle(){if(history_.empty())return false;auto s=std::move(history_.back());history_.pop_back();regs_=s.regs;memory_=std::move(s.memory);pc_=s.pc;nextId_=s.nextId;ifid_=s.ifid;idex_=s.idex;exmem1_=s.exmem1;mem1mem2_=s.mem1mem2;mem2wb_=s.mem2wb;stats_=s.stats;predictor_=s.predictor;cache_=s.cache;halted_=s.halted;fetchStopped_=s.fetchStopped;faulted_=s.faulted;status_=s.status;memWait_=s.memWait;memAccessStarted_=s.memAccessStarted;timeline_.resize(s.timelineSize);events_.clear();events_.push_back({"undo",stats_.cycles,"",{},-1,"","Restored the previous deterministic cycle snapshot."});return true;}
+void Simulator::fault(const std::string&m,const std::string&stage,uint64_t id){faulted_=true;fetchStopped_=true;status_="fault";events_.push_back({"fault",stats_.cycles,stage,{id},-1,"",m});}
+uint32_t Simulator::loadWord(uint32_t a){if((a&3)!=0){fault("Unaligned 32-bit load at address 0x"+static_cast<std::ostringstream&&>(std::ostringstream()<<std::hex<<a).str(),"MEM2",mem1mem2_.id);return 0;}if(uint64_t(a)+4>memory_.size()){fault("Out-of-bounds load at address "+std::to_string(a),"MEM2",mem1mem2_.id);return 0;}return cfg_.cacheEnabled?cache_.readWord(a):readLE(memory_,a);}
+void Simulator::storeWord(uint32_t a,uint32_t v){if((a&3)!=0){fault("Unaligned 32-bit store at address "+std::to_string(a),"MEM2",mem1mem2_.id);return;}if(uint64_t(a)+4>memory_.size()){fault("Out-of-bounds store at address "+std::to_string(a),"MEM2",mem1mem2_.id);return;}if(cfg_.cacheEnabled)cache_.writeWord(a,v);else writeLE(memory_,a,v);++stats_.memoryWrites;events_.push_back({"memory-write",stats_.cycles,"MEM2",{mem1mem2_.id},-1,"", "Stored 0x"+static_cast<std::ostringstream&&>(std::ostringstream()<<std::hex<<v).str()+" at address 0x"+static_cast<std::ostringstream&&>(std::ostringstream()<<std::hex<<a).str()+"."});}
+bool Simulator::pipelineEmpty()const{return!ifid_.valid&&!idex_.valid&&!exmem1_.valid&&!mem1mem2_.valid&&!mem2wb_.valid;}
+
+uint32_t Simulator::forwardedValue(uint8_t r,uint32_t original,const std::string&operand,uint64_t consumer){
+  if(r==0||cfg_.forwarding!=ForwardingMode::Full)return r==0?0:original;
+  struct C{const PipelineSlot*s;const char*n;}; C cs[]={{&exmem1_,"EX/MEM1"},{&mem1mem2_,"MEM1/MEM2"},{&mem2wb_,"MEM2/WB"}};
+  for(const auto&c:cs)if(writes(*c.s,r)){if(c.s->decoded.isLoad&&c.s==&exmem1_)continue;uint32_t v=c.s->decoded.isLoad?(c.s==&mem1mem2_?loadWord(c.s->memoryAddress):c.s->writeValue):c.s->writeValue;events_.push_back({"forward",stats_.cycles,"EX",{c.s->id,consumer},r,c.n,"Forwarded r"+std::to_string(r)+" from "+c.n+" to EX operand "+operand+"."});++stats_.forwardingEvents;return v;}
+  return original;
+}
+
+bool Simulator::shouldStall(const Decoded& d,std::string&reason,uint8_t&reg,uint64_t&producer)const{
+  if(cfg_.forwarding==ForwardingMode::Manual)return false;
+  auto check=[&](uint8_t r)->bool{if(r==0)return false;if(cfg_.forwarding==ForwardingMode::Full){if(writes(idex_,r)&&idex_.decoded.isLoad){reg=r;producer=idex_.id;reason="load result is not available until MEM2";return true;}return false;}for(auto*s:{&idex_,&exmem1_,&mem1mem2_})if(writes(*s,r)){reg=r;producer=s->id;reason="value is not yet visible in the register file";return true;}return false;};
+  return(d.usesRs1&&check(d.rs1))||(d.usesRs2&&check(d.rs2));
+}
+
+PipelineSlot Simulator::fetchSlot(uint32_t a){PipelineSlot s;if(a&3){fault("Unaligned instruction fetch at address "+std::to_string(a),"IF",0);return s;}size_t i=a/4;if(i>=program_.words.size()){fetchStopped_=true;return s;}s.valid=true;s.id=nextId_++;s.pc=a;s.raw=program_.words[i];s.decoded=decode(s.raw);s.assembly=program_.assembly[i];s.sourceLine=program_.sourceLines[i];if(s.decoded.op==Op::INVALID)fault("Invalid opcode at PC "+std::to_string(a),"IF",s.id);if(s.decoded.isBranch){s.predictedTaken=predictor_.predict(a);s.predictedTarget=s.predictedTaken?uint32_t(int64_t(a)+4+s.decoded.imm):a+4;}else if(s.decoded.op==Op::J||s.decoded.op==Op::JAL){s.predictedTaken=true;s.predictedTarget=uint32_t(int64_t(a)+4+s.decoded.imm);}else{s.predictedTarget=a+4;}++stats_.fetched;return s;}
+
+PipelineSlot Simulator::execute(const PipelineSlot&in,bool&redirect,uint32_t&target){PipelineSlot o=in;if(!in.valid)return o;auto d=in.decoded;uint32_t a=forwardedValue(d.rs1,in.rs1Value,"A",in.id),b=forwardedValue(d.rs2,in.rs2Value,"B",in.id);o.operandA=a;o.operandB=b;o.regWrite=d.writesRd&&d.rd!=0;o.memRead=d.isLoad;o.memWrite=d.isStore;
+  switch(d.op){case Op::ADD:o.aluResult=a+b;break;case Op::SUB:o.aluResult=a-b;break;case Op::MUL:o.aluResult=a*b;break;case Op::ADDI:o.aluResult=a+uint32_t(d.imm);break;case Op::AND:o.aluResult=a&b;break;case Op::OR:o.aluResult=a|b;break;case Op::XOR:o.aluResult=a^b;break;case Op::SLL:o.aluResult=a<<(b&31);break;case Op::SRL:o.aluResult=a>>(b&31);break;case Op::SLT:o.aluResult=int32_t(a)<int32_t(b);break;case Op::LW:case Op::SW:o.memoryAddress=a+uint32_t(d.imm);o.memoryData=b;o.aluResult=o.memoryAddress;break;case Op::LUI:o.aluResult=uint32_t(d.imm);break;case Op::JAL:o.aluResult=in.pc+4;break;default:break;}o.writeValue=o.aluResult;
+  if(d.isBranch||d.isJump){bool taken=true;if(d.op==Op::BEQ)taken=a==b;else if(d.op==Op::BNE)taken=a!=b;else if(d.op==Op::BLT)taken=int32_t(a)<int32_t(b);uint32_t actual=in.pc+4;if(taken){actual=d.op==Op::JR?a:uint32_t(int64_t(in.pc)+4+d.imm);}o.actualTaken=taken;o.actualTarget=actual;o.mispredicted=(in.predictedTaken!=taken)||(taken&&in.predictedTarget!=actual);if(d.isBranch){++stats_.branches;auto st=predictor_.update(in.pc,taken);if(o.mispredicted)++stats_.mispredictions;else ++stats_.correctPredictions;events_.push_back({"branch",stats_.cycles,"EX",{in.id},-1,"","Branch #"+std::to_string(in.id)+" was "+(taken?"taken":"not taken")+"; predictor state "+std::to_string(st.first)+" → "+std::to_string(st.second)+"."});}if(o.mispredicted){redirect=true;target=actual;events_.push_back({"mispredict",stats_.cycles,"EX",{in.id},-1,"","Prediction for instruction #"+std::to_string(in.id)+" was wrong; redirected fetch to PC 0x"+static_cast<std::ostringstream&&>(std::ostringstream()<<std::hex<<actual).str()+"."});}}
+  return o;
+}
+
+std::string Simulator::stepCycle(){
+  if(halted_||faulted_)return getState(); if(stats_.cycles>=cfg_.cycleLimit){fault("Cycle limit reached; execution stopped to prevent an infinite run.","",0);return getState();}
+  snapshot();events_.clear();++stats_.cycles;status_="running";
+  PipelineSlot n_ifid{},n_idex{},n_exmem1{},n_mem1mem2{},n_mem2wb{},flushedIf{},flushedId{};
+
+  if(mem2wb_.valid){if(mem2wb_.regWrite&&mem2wb_.decoded.rd!=0){regs_[mem2wb_.decoded.rd]=mem2wb_.writeValue;++stats_.registerWrites;events_.push_back({"register-write",stats_.cycles,"WB",{mem2wb_.id},mem2wb_.decoded.rd,"","Wrote r"+std::to_string(mem2wb_.decoded.rd)+" = "+std::to_string(int32_t(mem2wb_.writeValue))+"."});}regs_[0]=0;++stats_.retired;if(mem2wb_.decoded.op==Op::HALT){halted_=true;status_="halted";events_.push_back({"halt",stats_.cycles,"WB",{mem2wb_.id},-1,"","HALT retired after all older instructions completed."});}}
+  n_mem2wb=mem1mem2_;if(mem1mem2_.valid){if(mem1mem2_.memRead)n_mem2wb.writeValue=loadWord(mem1mem2_.memoryAddress);if(mem1mem2_.memWrite)storeWord(mem1mem2_.memoryAddress,mem1mem2_.memoryData);}
+
+  bool memoryStall=false;
+  if(exmem1_.valid&&(exmem1_.memRead||exmem1_.memWrite)&&cfg_.cacheEnabled){
+    if(!memAccessStarted_){uint32_t lat=cache_.beginAccess(exmem1_.memoryAddress,exmem1_.memWrite,memory_);memAccessStarted_=true;memWait_=lat>0?lat-1:0;if(lat>cfg_.cacheHitLatency)events_.push_back({"cache-miss",stats_.cycles,"MEM1",{exmem1_.id},-1,"","Data-cache miss for instruction #"+std::to_string(exmem1_.id)+"; MEM1 will wait "+std::to_string(memWait_)+" extra cycle(s)."});}
+    if(memWait_>0){--memWait_;memoryStall=true;++stats_.stallCycles;++stats_.memoryStallCycles;events_.push_back({"stall",stats_.cycles,"MEM1",{exmem1_.id},-1,"cache","Pipeline stalled while the data cache services instruction #"+std::to_string(exmem1_.id)+"."});}
+  }
+  if(memoryStall){n_mem1mem2={};n_exmem1=exmem1_;n_exmem1.stalled=true;n_idex=idex_;n_idex.stalled=true;n_ifid=ifid_;n_ifid.stalled=true;}
+  else {
+    n_mem1mem2=exmem1_;memAccessStarted_=false;memWait_=0;
+    bool redirect=false;uint32_t target=0;n_exmem1=execute(idex_,redirect,target);
+    std::string reason;uint8_t hazardReg=0;uint64_t producer=0;bool dataStall=ifid_.valid&&shouldStall(ifid_.decoded,reason,hazardReg,producer);
+    if(dataStall){n_idex={};n_idex.bubble=true;n_ifid=ifid_;n_ifid.stalled=true;++stats_.stallCycles;++stats_.dataStallCycles;events_.push_back({"stall",stats_.cycles,"ID",{producer,ifid_.id},hazardReg,"hazard","Stalled ID because r"+std::to_string(hazardReg)+" is produced by instruction #"+std::to_string(producer)+" and "+reason+"."});events_.push_back({"bubble",stats_.cycles,"EX",{ifid_.id},hazardReg,"hazard","Inserted a bubble into EX while instruction #"+std::to_string(ifid_.id)+" remains in ID."});}
+    else if(ifid_.valid){n_idex=ifid_;n_idex.rs1Value=regs_[ifid_.decoded.rs1];n_idex.rs2Value=regs_[ifid_.decoded.rs2];if(ifid_.decoded.op==Op::HALT)fetchStopped_=true;}
+    if(!dataStall&&!fetchStopped_&&!faulted_){n_ifid=fetchSlot(pc_);pc_=n_ifid.valid?n_ifid.predictedTarget:pc_;}
+    if(dataStall){/* PC and IF/ID remain unchanged. */}
+    if(redirect){std::vector<uint64_t> flushed;flushedId=n_idex;flushedIf=n_ifid;flushedId.squashed=flushedId.valid;flushedIf.squashed=flushedIf.valid;if(n_idex.valid)flushed.push_back(n_idex.id);if(n_ifid.valid)flushed.push_back(n_ifid.id);stats_.flushedInstructions+=flushed.size();stats_.controlPenalty+=flushed.size();n_idex={};n_ifid={};pc_=target;fetchStopped_=false;if(!flushed.empty()){std::string ids;for(size_t i=0;i<flushed.size();++i){if(i)ids+=" and #";else ids+="#";ids+=std::to_string(flushed[i]);}events_.push_back({"flush",stats_.cycles,"EX",flushed,-1,"control","Flushed instructions "+ids+" after control flow resolved in EX."});}}
+  }
+  ifid_=n_ifid;idex_=n_idex;exmem1_=n_exmem1;mem1mem2_=n_mem1mem2;mem2wb_=n_mem2wb;regs_[0]=0;
+  TimelineFrame f;f.cycle=stats_.cycles;f.slots={PipelineSlot{},ifid_,idex_,exmem1_,mem1mem2_,mem2wb_};
+  if(!fetchStopped_&&pc_/4<program_.words.size()){f.slots[0].valid=true;f.slots[0].pc=pc_;f.slots[0].assembly=program_.assembly[pc_/4];f.slots[0].sourceLine=program_.sourceLines[pc_/4];f.slots[0].decoded=decode(program_.words[pc_/4]);}
+  if(flushedIf.valid)f.slots[0]=flushedIf;if(flushedId.valid)f.slots[1]=flushedId;
+  f.events=events_;timeline_.push_back(std::move(f));
+  if(fetchStopped_&&pipelineEmpty()&&!halted_&&!faulted_){halted_=true;status_="completed";}
+  return getState();
+}
+
+std::string Simulator::stepInstruction(){uint64_t before=stats_.retired;do{stepCycle();}while(!halted_&&!faulted_&&stats_.retired==before);return getState();}
+std::string Simulator::runCycles(uint32_t n){for(uint32_t i=0;i<n&&!halted_&&!faulted_;++i){if(breakpoints_.count(pc_)){status_="breakpoint";break;}stepCycle();}return getState();}
+std::string Simulator::runUntilCompletion(uint32_t n){return runCycles(n);}
+std::string Simulator::runUntilBreakpoint(uint32_t n){for(uint32_t i=0;i<n&&!halted_&&!faulted_;++i){if(breakpoints_.count(pc_)){status_="breakpoint";break;}stepCycle();}return getState();}
+void Simulator::setBreakpoint(uint32_t a,bool on){if(on)breakpoints_.insert(a);else breakpoints_.erase(a);}
+void Simulator::setRegister(uint32_t i,uint32_t v){if(i>0&&i<32&&!halted_&&status_!="running")regs_[i]=v;regs_[0]=0;}
+std::string Simulator::readMemory(uint32_t a,uint32_t len)const{std::ostringstream o;o<<'[';for(uint32_t i=0;i<len&&uint64_t(a)+i<memory_.size();++i){if(i)o<<',';o<<unsigned(memory_[a+i]);}o<<']';return o.str();}
+bool Simulator::writeMemory(uint32_t a,const std::string& csv){if(status_=="running")return false;std::istringstream in(csv);std::string x;uint32_t i=0;while(std::getline(in,x,',')){int64_t v=0;if(!parseInteger(trim(x),v)||v<0||v>255||uint64_t(a)+i>=memory_.size())return false;memory_[a+i++]=uint8_t(v);}return true;}
+
+std::string Simulator::slotJson(const PipelineSlot&s,const std::string&stage)const{std::ostringstream o;o<<"{\"stage\":\""<<stage<<"\",\"valid\":"<<(s.valid?"true":"false")<<",\"stalled\":"<<(s.stalled?"true":"false")<<",\"bubble\":"<<(s.bubble?"true":"false")<<",\"squashed\":"<<(s.squashed?"true":"false")<<",\"id\":"<<s.id<<",\"pc\":"<<s.pc<<",\"raw\":"<<s.raw<<",\"op\":\""<<opName(s.decoded.op)<<"\",\"assembly\":\""<<jsonEscape(s.assembly)<<"\",\"sourceLine\":"<<s.sourceLine<<",\"rs1\":"<<unsigned(s.decoded.rs1)<<",\"rs2\":"<<unsigned(s.decoded.rs2)<<",\"rd\":"<<unsigned(s.decoded.rd)<<",\"immediate\":"<<s.decoded.imm<<",\"operandA\":"<<s.operandA<<",\"operandB\":"<<s.operandB<<",\"aluResult\":"<<s.aluResult<<",\"memoryAddress\":"<<s.memoryAddress<<",\"memoryData\":"<<s.memoryData<<",\"writeValue\":"<<s.writeValue<<",\"regWrite\":"<<(s.regWrite?"true":"false")<<",\"memRead\":"<<(s.memRead?"true":"false")<<",\"memWrite\":"<<(s.memWrite?"true":"false")<<",\"predictedTaken\":"<<(s.predictedTaken?"true":"false")<<",\"actualTaken\":"<<(s.actualTaken?"true":"false")<<",\"mispredicted\":"<<(s.mispredicted?"true":"false")<<'}';return o.str();}
+std::string Simulator::getEvents()const{std::ostringstream o;o<<'[';for(size_t i=0;i<events_.size();++i){if(i)o<<',';auto&e=events_[i];o<<"{\"type\":\""<<e.type<<"\",\"cycle\":"<<e.cycle<<",\"stage\":\""<<e.stage<<"\",\"instructionIds\":[";for(size_t k=0;k<e.instructionIds.size();++k){if(k)o<<',';o<<e.instructionIds[k];}o<<"],\"reg\":"<<e.reg<<",\"source\":\""<<e.source<<"\",\"message\":\""<<jsonEscape(e.message)<<"\"}";}o<<']';return o.str();}
+std::string Simulator::getTimeline()const{std::ostringstream o;o<<'[';for(size_t i=0;i<timeline_.size();++i){if(i)o<<',';o<<"{\"cycle\":"<<timeline_[i].cycle<<",\"stages\":[";static const char* names[]={"IF","ID","EX","MEM1","MEM2","WB"};for(int k=0;k<6;++k){if(k)o<<',';o<<slotJson(timeline_[i].slots[k],names[k]);}o<<"]}";}o<<']';return o.str();}
+std::string Simulator::getState()const{std::ostringstream o;o<<"{\"status\":\""<<status_<<"\",\"halted\":"<<(halted_?"true":"false")<<",\"faulted\":"<<(faulted_?"true":"false")<<",\"pc\":"<<pc_<<",\"configuration\":{\"forwarding\":\""<<forwardingName(cfg_.forwarding)<<"\",\"predictor\":\""<<predictorName(cfg_.predictor)<<"\",\"cacheEnabled\":"<<(cfg_.cacheEnabled?"true":"false")<<"},\"registers\":[";for(size_t i=0;i<32;++i){if(i)o<<',';o<<regs_[i];}o<<"],\"pipeline\":["<<slotJson(ifid_,"ID")<<','<<slotJson(idex_,"EX")<<','<<slotJson(exmem1_,"MEM1")<<','<<slotJson(mem1mem2_,"MEM2")<<','<<slotJson(mem2wb_,"WB")<<"],\"statistics\":{";
+  o<<"\"cycles\":"<<stats_.cycles<<",\"fetched\":"<<stats_.fetched<<",\"retired\":"<<stats_.retired<<",\"cpi\":"<<(stats_.retired?double(stats_.cycles)/stats_.retired:0)<<",\"ipc\":"<<(stats_.cycles?double(stats_.retired)/stats_.cycles:0)<<",\"stallCycles\":"<<stats_.stallCycles<<",\"dataStallCycles\":"<<stats_.dataStallCycles<<",\"memoryStallCycles\":"<<stats_.memoryStallCycles<<",\"controlPenalty\":"<<stats_.controlPenalty<<",\"forwardingEvents\":"<<stats_.forwardingEvents<<",\"flushedInstructions\":"<<stats_.flushedInstructions<<",\"branches\":"<<stats_.branches<<",\"correctPredictions\":"<<stats_.correctPredictions<<",\"mispredictions\":"<<stats_.mispredictions<<",\"registerWrites\":"<<stats_.registerWrites<<",\"memoryWrites\":"<<stats_.memoryWrites<<"},\"events\":"<<getEvents()<<",\"predictorTable\":[";
+  const auto&pt=predictor_.entries();for(size_t i=0;i<pt.size();++i){if(i)o<<',';o<<"{\"index\":"<<i<<",\"valid\":"<<(pt[i].valid?"true":"false")<<",\"pc\":"<<pt[i].tagPc<<",\"state\":"<<unsigned(pt[i].state)<<",\"prediction\":"<<(pt[i].valid&&predictor_.predict(pt[i].tagPc)?"true":"false")<<",\"recentTaken\":"<<(pt[i].recentTaken?"true":"false")<<'}';}o<<"],\"cache\":{\"reads\":"<<cache_.stats().reads<<",\"writes\":"<<cache_.stats().writes<<",\"hits\":"<<cache_.stats().hits<<",\"misses\":"<<cache_.stats().misses<<",\"dirtyWritebacks\":"<<cache_.stats().dirtyWritebacks<<",\"sets\":[";auto&sets=cache_.sets();for(size_t s=0;s<sets.size();++s){if(s)o<<',';o<<'[';for(size_t w=0;w<sets[s].size();++w){if(w)o<<',';auto&l=sets[s][w];o<<"{\"valid\":"<<(l.valid?"true":"false")<<",\"dirty\":"<<(l.dirty?"true":"false")<<",\"tag\":"<<l.tag<<",\"lru\":"<<l.lru<<",\"preview\":\"";for(size_t b=0;b<std::min<size_t>(8,l.data.size());++b)o<<std::hex<<std::setw(2)<<std::setfill('0')<<unsigned(l.data[b]);o<<std::dec<<"\"}";}o<<']';}o<<"]},\"breakpoints\":[";size_t bi=0;for(auto b:breakpoints_){if(bi++)o<<',';o<<b;}o<<"]}";return o.str();}
+
+ReferenceResult ReferenceInterpreter::run(const Program&p,const Configuration&cfg,uint64_t max)const{ReferenceResult r;r.memory.assign(std::max(1024u,cfg.memoryBytes),0);r.registers.fill(0);r.registers[29]=std::min<uint32_t>(cfg.initialStackPointer,uint32_t(r.memory.size()-4));for(size_t i=0;i<p.words.size();++i)writeLE(r.memory,uint32_t(i*4),p.words[i]);while(r.steps++<max){if(r.pc&3||r.pc/4>=p.words.size()){r.error="Invalid PC";break;}auto d=decode(p.words[r.pc/4]);uint32_t next=r.pc+4,a=r.registers[d.rs1],b=r.registers[d.rs2],v=0;switch(d.op){case Op::NOP:break;case Op::ADD:v=a+b;break;case Op::SUB:v=a-b;break;case Op::MUL:v=a*b;break;case Op::ADDI:v=a+uint32_t(d.imm);break;case Op::AND:v=a&b;break;case Op::OR:v=a|b;break;case Op::XOR:v=a^b;break;case Op::SLL:v=a<<(b&31);break;case Op::SRL:v=a>>(b&31);break;case Op::SLT:v=int32_t(a)<int32_t(b);break;case Op::LUI:v=uint32_t(d.imm);break;case Op::LW:{uint32_t x=a+uint32_t(d.imm);if((x&3)||uint64_t(x)+4>r.memory.size()){r.error="Invalid load";return r;}v=readLE(r.memory,x);break;}case Op::SW:{uint32_t x=a+uint32_t(d.imm);if((x&3)||uint64_t(x)+4>r.memory.size()){r.error="Invalid store";return r;}writeLE(r.memory,x,b);break;}case Op::BEQ:if(a==b)next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::BNE:if(a!=b)next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::BLT:if(int32_t(a)<int32_t(b))next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::J:next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::JAL:v=r.pc+4;next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::JR:next=a;break;case Op::HALT:r.halted=true;r.pc=next;return r;default:r.error="Invalid opcode";return r;}if(d.writesRd&&d.rd)r.registers[d.rd]=v;r.registers[0]=0;r.pc=next;}if(!r.halted&&r.error.empty())r.error="Step limit reached";return r;}
+
+}  // namespace cpulab
