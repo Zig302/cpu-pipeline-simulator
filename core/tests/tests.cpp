@@ -65,6 +65,10 @@ int main() {
   test("manual mode exposes unscheduled RAW behavior", [] {
     auto s=run("ADDI r1,r0,5\nADD r2,r1,r1\nHALT\n", "{\"forwarding\":\"manual\"}");
     CHECK(s.registers()[2]==0); CHECK(s.statistics().dataStallCycles==0);
+    auto comparison=s.compareReference();CHECK(comparison.find("\"matches\":false")!=std::string::npos);CHECK(comparison.find("\"register\":2")!=std::string::npos);CHECK(comparison.find("\"expected\":10")!=std::string::npos);
+  });
+  test("reference diagnostics confirm correct pipeline completion", [] {
+    Simulator s;CHECK(s.loadProgram("LI r1,5\nADD r2,r1,r1\nHALT\n"));CHECK(s.compareReference().find("\"comparable\":false")!=std::string::npos);s.runUntilCompletion();auto result=s.compareReference();CHECK(result.find("\"matches\":true")!=std::string::npos);CHECK(result.find("\"differences\":[]")!=std::string::npos);
   });
   test("taken branch flushes wrong-path side effects", [] {
     auto s=run("LI r1,1\nBEQ r1,r1,taken\nADDI r2,r0,99\nSW r1,256(r0)\ntaken: ADDI r3,r0,7\nHALT\n", "{\"predictor\":\"always-not-taken\"}");

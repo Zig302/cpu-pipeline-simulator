@@ -158,6 +158,7 @@ class Simulator {
   std::string getState() const;
   std::string getEvents() const;
   std::string getTimeline() const;
+  std::string compareReference() const;
   void setBreakpoint(uint32_t address, bool enabled = true);
   void setRegister(uint32_t index, uint32_t value);
   std::string readMemory(uint32_t address, uint32_t length) const;
@@ -222,4 +223,3 @@ class ReferenceInterpreter {
 };
 
 }  // namespace cpulab
-

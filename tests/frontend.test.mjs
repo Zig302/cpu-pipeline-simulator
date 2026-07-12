@@ -106,3 +106,48 @@ test("the interface provides a readable guide and organized state workspace", as
   assert.match(styles, /\.density-comfortable \.stage-name\{font-size:17px\}/);
   assert.match(styles, /Compact preserves the prior view/);
 });
+
+test("v1.1 project persistence and trace export are versioned and validated", async () => {
+  const [project, component, pkg] = await Promise.all([
+    readFile(new URL("frontend/src/project.ts", root), "utf8"),
+    readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
+    readFile(new URL("package.json", root), "utf8"),
+  ]);
+  assert.equal(JSON.parse(pkg).version, "1.1.0");
+  assert.match(project, /format: "pipeline-lab-project"/);
+  assert.match(project, /Unsupported Pipeline Lab project format/);
+  assert.match(project, /format: "pipeline-lab-trace"/);
+  assert.match(component, /Download project/);
+  assert.match(component, /Restore browser draft/);
+  assert.match(component, /Export execution trace/);
+});
+
+test("v1.1 learning center includes guided labs, ISA help, and core-backed comparison", async () => {
+  const [learning, center, component, bindings] = await Promise.all([
+    readFile(new URL("frontend/src/learning.ts", root), "utf8"),
+    readFile(new URL("frontend/src/LearningCenter.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
+    readFile(new URL("core/src/bindings.cpp", root), "utf8"),
+  ]);
+  for (const id of ["pipeline-basics", "load-use", "branch-recovery", "manual-correctness"]) assert.match(learning, new RegExp(`id: "${id}"`));
+  for (const mnemonic of ["ADD", "LW", "BEQ / BNE / BLT", "JAL", "NOP / HALT"]) assert.match(learning, new RegExp(`mnemonic: "${mnemonic.replaceAll("/", "\\/")}"`));
+  assert.match(center, /Run comparison/);
+  assert.match(component, /createSimulator\(\)/);
+  assert.match(component, /Reference mismatch found/);
+  assert.match(bindings, /compareReference/);
+});
+
+test("keyboard and accessibility landmarks are present", async () => {
+  const [component, center, styles] = await Promise.all([
+    readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/LearningCenter.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/lab.css", root), "utf8"),
+  ]);
+  assert.match(component, /Skip to simulator workspace/);
+  assert.match(component, /event\.key==="F10"/);
+  assert.match(component, /event\.key\.toLowerCase\(\)==="s"/);
+  assert.match(component, /role="tabpanel"/);
+  assert.match(center, /aria-current=\{current \? "step"/);
+  assert.match(styles, /prefers-reduced-motion:reduce/);
+  assert.match(styles, /:focus-visible/);
+});

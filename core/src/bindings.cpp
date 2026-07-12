@@ -19,6 +19,7 @@ EMSCRIPTEN_BINDINGS(cpulab_module) {
     .function("getState", &cpulab::Simulator::getState)
     .function("getEvents", &cpulab::Simulator::getEvents)
     .function("getTimeline", &cpulab::Simulator::getTimeline)
+    .function("compareReference", &cpulab::Simulator::compareReference)
     .function("setBreakpoint", &cpulab::Simulator::setBreakpoint)
     .function("setRegister", &cpulab::Simulator::setRegister)
     .function("readMemory", &cpulab::Simulator::readMemory)
@@ -27,4 +28,3 @@ EMSCRIPTEN_BINDINGS(cpulab_module) {
     .function("isHalted", &cpulab::Simulator::isHalted);
 }
 #endif
-

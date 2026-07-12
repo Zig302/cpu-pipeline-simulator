@@ -4,6 +4,16 @@ Pipeline Lab is a browser-based, cycle-accurate laboratory for a small 32-bit RI
 
 ![Pipeline Lab interface](public/og.png)
 
+## What's new in 1.1
+
+- Save portable project files, restore private browser drafts, and export complete execution traces.
+- Work through four guided labs with live checkpoints and searchable ISA documentation.
+- Compare forwarding and branch-prediction configurations using independent C++ WebAssembly runs.
+- Diagnose incorrect manual schedules against the non-pipelined C++ reference interpreter.
+- Use keyboard shortcuts, accessible dialogs/tabs, reduced-motion support, and readable display densities.
+
+See the [1.1 release notes](docs/release-notes-1.1.md) for shortcuts, compatibility, and the complete change list.
+
 ## What is implemented
 
 - Exactly six stages: **IF → ID → EX → MEM1 → MEM2 → WB**.
@@ -15,6 +25,9 @@ Pipeline Lab is a browser-based, cycle-accurate laboratory for a small 32-bit RI
 - Optional set-associative LRU, write-back, write-allocate data cache with configurable timing in the C++ API.
 - Structured C++ events for stalls, bubbles, forwarding, cache misses, flushes, writes, faults, predictor updates, and HALT.
 - Assembly editor with highlighting, breakpoint/current-PC gutter, six-stage cards, timeline, datapath, state inspectors, event explanations, configuration controls, and 12 teaching examples.
+- Versioned project import/export, browser-local drafts, and complete JSON execution traces.
+- Guided checkpoint labs, searchable ISA help, C++ reference-result diagnostics, and side-by-side configuration comparisons.
+- Keyboard navigation, visible focus, reduced-motion handling, accessible tabs/dialogs, and comfortable/compact display densities.
 
 ## Architecture
 
@@ -26,7 +39,7 @@ React controls ──JSON/Embind──> C++ six-stage engine
        └──── state / events / timeline ────┘
 ```
 
-The native and WebAssembly builds compile `core/src/core.cpp`. TypeScript only owns presentation, timers, and user interaction. See [architecture.md](docs/architecture.md), [isa.md](docs/isa.md), and [pipeline-semantics.md](docs/pipeline-semantics.md).
+The native and WebAssembly builds compile `core/src/core.cpp`. TypeScript only owns presentation, timers, and user interaction. See [architecture.md](docs/architecture.md), [isa.md](docs/isa.md), [pipeline-semantics.md](docs/pipeline-semantics.md), [browser support](docs/browser-support.md), and the [1.1 release notes](docs/release-notes-1.1.md).
 
 ## Quick start
 
