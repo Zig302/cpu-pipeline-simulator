@@ -172,3 +172,21 @@ test("keyboard and accessibility landmarks are present", async () => {
   assert.match(styles, /prefers-reduced-motion:reduce/);
   assert.match(styles, /:focus-visible/);
 });
+
+test("stage explanations follow live cycle state and expose real register reads", async () => {
+  const [component, types, core] = await Promise.all([
+    readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/types.ts", root), "utf8"),
+    readFile(new URL("core/src/core.cpp", root), "utf8"),
+  ]);
+  assert.match(component, /selectedStage\?slots\.find/);
+  assert.match(component, /setSelectedStage\(name\)/);
+  assert.match(component, /The register file reads/);
+  assert.match(component, /Latched register values/);
+  assert.match(component, /No data-memory access is required/);
+  assert.match(component, /register file commits it on the next cycle step/);
+  for (const field of ["usesRs1", "usesRs2", "rs1Value", "rs2Value"]) {
+    assert.match(types, new RegExp(`${field}:`));
+    assert.match(core, new RegExp(`\\\\\"${field}\\\\\"`));
+  }
+});

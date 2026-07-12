@@ -90,6 +90,17 @@ int main() {
   test("undo restores registers, cycle and deterministic replay", [] {
     Simulator s;CHECK(s.loadProgram("LI r1,9\nHALT\n"));s.runCycles(7);auto state=s.getState();auto regs=s.registers();auto cycles=s.statistics().cycles;CHECK(s.restorePreviousCycle());s.stepCycle();CHECK(s.registers()==regs);CHECK(s.statistics().cycles==cycles);CHECK(s.getState()==state);
   });
+  test("ID explanations serialize source usage and register-port values", [] {
+    Simulator s;CHECK(s.loadProgram("ADD r2,r1,r1\nHALT\n"));s.setRegister(1,7);s.stepCycle();
+    auto state=s.getState();CHECK(state.find("\"stage\":\"ID\"")!=std::string::npos);CHECK(state.find("\"usesRs1\":true")!=std::string::npos);CHECK(state.find("\"usesRs2\":true")!=std::string::npos);CHECK(state.find("\"rs1Value\":7")!=std::string::npos);CHECK(state.find("\"rs2Value\":7")!=std::string::npos);
+    auto timeline=s.getTimeline();CHECK(timeline.find("\"rs1Value\":7")!=std::string::npos);CHECK(s.restorePreviousCycle());s.stepCycle();CHECK(s.getState()==state);
+  });
+  test("array summation remains deterministic through step and undo stress", [] {
+    Simulator s;CHECK(s.loadProgram("LI r1,1024\nLI r2,5\nLI r3,0\nLI r4,0\nloop: LW r5,0(r1)\nADD r3,r3,r5\nADDI r1,r1,4\nADDI r4,r4,1\nBLT r4,r2,loop\nHALT\n"));
+    CHECK(s.writeMemory(1024,"1,0,0,0,2,0,0,0,3,0,0,0,4,0,0,0,5,0,0,0"));
+    for(int guard=0;guard<200&&!s.isHalted();++guard){s.stepCycle();auto committed=s.getState();CHECK(s.restorePreviousCycle());s.stepCycle();CHECK(s.getState()==committed);}
+    CHECK(s.isHalted());CHECK(s.registers()[3]==15);CHECK(s.statistics().dataStallCycles==5);
+  });
   test("pipeline fills and drains in N plus five cycles", [] {
     auto s=run("ADDI r1,r0,1\nADDI r2,r0,2\nHALT\n");CHECK(s.statistics().cycles==8);CHECK(s.statistics().retired==3);
   });
