@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { benchmarkCsv, benchmarkScenarios, createBenchmarkReport, type BenchmarkKind, type BenchmarkReport } from "./benchmark";
 import { examples } from "./examples";
-import { LearningCenter, type ComparisonResult } from "./LearningCenter";
+import { LearningCenter } from "./LearningCenter";
 import { lessons, type Lesson } from "./learning";
-import { createProject, createTrace, downloadJson, parseProject, type ProjectDocument } from "./project";
+import { createProject, createTrace, downloadJson, downloadText, parseProject, type ProjectDocument } from "./project";
 import { createSimulator } from "./wasm";
 import type { AssemblyResult, CoreEvent, CoreSimulator, CpuState, PipelineSlot, ReferenceComparison, StageName, TimelineFrame } from "./types";
 
@@ -97,7 +98,7 @@ export default function CpuLab() {
   const [breakpointLines,setBreakpointLines]=useState(new Set<number>()); const [memoryAddress,setMemoryAddress]=useState(0x400); const [exampleId,setExampleId]=useState("loop"); const [guideOpen,setGuideOpen]=useState(false);
   const [projectName,setProjectName]=useState("Pipeline Lab project"); const [projectMessage,setProjectMessage]=useState("");
   const [learningOpen,setLearningOpen]=useState(false); const [activeLessonId,setActiveLessonId]=useState(lessons[0].id); const [reference,setReference]=useState<ReferenceComparison|null>(null);
-  const [comparison,setComparison]=useState<ComparisonResult|null>(null); const [comparing,setComparing]=useState(false);
+  const [benchmark,setBenchmark]=useState<BenchmarkReport|null>(null); const [benchmarking,setBenchmarking]=useState(false);
 
   const refresh=useCallback(()=>{const c=coreRef.current;if(!c)return;const next=JSON.parse(c.getState()) as CpuState;setState(next);setTimeline(JSON.parse(c.getTimeline()));setReference(next.halted||next.faulted?JSON.parse(c.compareReference()) as ReferenceComparison:null);},[]);
   const currentConfiguration=useMemo(()=>({forwarding,predictor,cacheEnabled}),[forwarding,predictor,cacheEnabled]);
@@ -119,7 +120,25 @@ export default function CpuLab() {
   const importProject=useCallback(async(file:File)=>{try{applyProject(parseProject(await file.text()));}catch(error){setProjectMessage(error instanceof Error?error.message:String(error));}},[applyProject]);
   const exportTrace=useCallback(()=>{if(!state)return;downloadJson("pipeline-lab-trace.json",createTrace(loadedSource,state,timeline,reference));setProjectMessage("Execution trace downloaded.");},[state,loadedSource,timeline,reference]);
   const loadLesson=useCallback((lesson:Lesson)=>{const example=examples.find(item=>item.id===lesson.exampleId);if(!example)return;const next={...currentConfiguration,...lesson.configuration};setActiveLessonId(lesson.id);setExampleId(example.id);setProjectName(lesson.title);loadWithConfiguration(example.source,next);},[currentConfiguration,loadWithConfiguration]);
-  const runComparison=useCallback(async(kind:"forwarding"|"prediction")=>{setComparing(true);setComparison(null);const variants=kind==="forwarding"?[{label:"Full forwarding",config:{...currentConfiguration,forwarding:"full"}},{label:"No forwarding",config:{...currentConfiguration,forwarding:"none"}}]:[{label:"Two-bit predictor",config:{...currentConfiguration,predictor:"two-bit"}},{label:"Always not taken",config:{...currentConfiguration,predictor:"always-not-taken"}}];try{const results=await Promise.all(variants.map(async variant=>{const c=await createSimulator();try{c.loadProgram(loadedSource);c.resetWithJson(JSON.stringify(variant.config));c.runUntilCompletion(100000);return {label:variant.label,statistics:(JSON.parse(c.getState()) as CpuState).statistics};}finally{c.delete();}}));setComparison({title:kind==="forwarding"?"Dependency handling":"Branch prediction",left:results[0],right:results[1]});}finally{setComparing(false);}},[currentConfiguration,loadedSource]);
+  const runBenchmark=useCallback(async(kind:BenchmarkKind)=>{
+    setBenchmarking(true); setBenchmark(null);
+    try {
+      const runs=await Promise.all(benchmarkScenarios(kind,currentConfiguration).map(async scenario=>{
+        const c=await createSimulator();
+        try {
+          c.loadProgram(loadedSource); c.resetWithJson(JSON.stringify(scenario.configuration)); c.runUntilCompletion(100000);
+          const result=JSON.parse(c.getState()) as CpuState;
+          const referenceResult=JSON.parse(c.compareReference()) as ReferenceComparison;
+          return {id:scenario.id,label:scenario.label,configuration:scenario.configuration,statistics:result.statistics,cache:{reads:result.cache.reads,writes:result.cache.writes,hits:result.cache.hits,misses:result.cache.misses,dirtyWritebacks:result.cache.dirtyWritebacks},architecturalMatch:referenceResult.matches};
+        } finally { c.delete(); }
+      }));
+      const titles:Record<BenchmarkKind,string>={suite:"Release performance matrix",forwarding:"Forwarding benchmark",prediction:"Branch predictor benchmark",cache:"Data-cache benchmark"};
+      setBenchmark(createBenchmarkReport(titles[kind],kind,loadedSource,runs));
+    } catch (error) {
+      setProjectMessage(`Benchmark failed: ${error instanceof Error?error.message:String(error)}`);
+    } finally { setBenchmarking(false); }
+  },[currentConfiguration,loadedSource]);
+  const exportBenchmark=useCallback((format:"json"|"csv")=>{if(!benchmark)return;if(format==="json")downloadJson("pipeline-lab-benchmark.json",benchmark);else downloadText("pipeline-lab-benchmark.csv",benchmarkCsv(benchmark),"text/csv");},[benchmark]);
   const closeLearning=useCallback(()=>setLearningOpen(false),[]);
   useEffect(()=>{const handle=(event:KeyboardEvent)=>{const target=event.target as HTMLElement|null;const editing=!!target?.closest("input, textarea, select, [contenteditable=true]");if((event.ctrlKey||event.metaKey)&&event.key==="Enter"){event.preventDefault();assembleProgram();return;}if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="s"){event.preventDefault();saveProjectFile();return;}if(editing)return;if(event.key==="F10"){event.preventDefault();act(c=>event.shiftKey?c.stepInstruction():c.stepCycle());return;}if(event.key==="?"){event.preventDefault();setGuideOpen(true);}};window.addEventListener("keydown",handle);return()=>window.removeEventListener("keydown",handle);},[act,assembleProgram,saveProjectFile]);
   const pipelineLines=new Set(state?.pipeline.filter(s=>s.valid).map(s=>s.sourceLine));
@@ -177,7 +196,7 @@ export default function CpuLab() {
       </section>
     </section>
     {guideOpen&&<div className="guide-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setGuideOpen(false);}}><section className="guide-modal" role="dialog" aria-modal="true" aria-labelledby="guide-title"><button className="guide-close" onClick={()=>setGuideOpen(false)} aria-label="Close guide">×</button><span className="eyebrow">QUICK START</span><h2 id="guide-title">How to use Pipeline Lab</h2><p className="guide-intro">Choose an example or write assembly, then watch the C++ processor advance one clock at a time. The source shown in the editor is always the program loaded in the CPU unless the editor displays “Changes not assembled.”</p><div className="guide-grid"><article><b>1. Load a program</b><p>Example programs assemble automatically. For your own edits, click <strong>Assemble</strong>. Red line messages identify invalid syntax.</p></article><article><b>2. Execute precisely</b><p><strong>Run</strong> animates cycles. <strong>Step cycle</strong> advances one clock. <strong>Step instruction</strong> advances until one instruction retires.</p></article><article><b>3. Inspect the pipeline</b><p>Click a stage or timeline cell to populate the Explanation panel with operands, results, hazards, forwarding, stalls, and flushes.</p></article><article><b>4. Use breakpoints</b><p>Click a source line number, then choose <strong>More → Run to breakpoint</strong>. Undo restores the previous deterministic cycle.</p></article><article><b>5. Compare configurations</b><p>Open Processor configuration to switch forwarding, branch prediction, or cache behavior. Apply & reset loads the new timing model.</p></article><article><b>6. Adjust readability</b><p>Choose <strong>More → Interface density</strong>. Comfortable uses larger text and roomier diagrams; Compact restores the original dense workbench.</p></article></div><div className="guide-tip"><b>Best first lesson</b><span>Load “Load-use hazard,” step cycle-by-cycle, and click the stalled timeline cell to see why one bubble is required.</span></div></section></div>}
-    <LearningCenter open={learningOpen} state={state} reference={reference} activeLessonId={activeLessonId} comparison={comparison} comparing={comparing} onClose={closeLearning} onLoadLesson={loadLesson} onRunComparison={runComparison}/>
+    <LearningCenter open={learningOpen} state={state} reference={reference} activeLessonId={activeLessonId} benchmark={benchmark} benchmarking={benchmarking} onClose={closeLearning} onLoadLesson={loadLesson} onRunBenchmark={runBenchmark} onExportBenchmark={exportBenchmark}/>
     <footer><span>C++20 / WebAssembly core</span><span>IF → ID → EX → MEM1 → MEM2 → WB</span><span>Branch accuracy {branchAccuracy.toFixed(1)}%</span></footer>
   </main>;
 }

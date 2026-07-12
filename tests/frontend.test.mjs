@@ -107,13 +107,13 @@ test("the interface provides a readable guide and organized state workspace", as
   assert.match(styles, /Compact preserves the prior view/);
 });
 
-test("v1.1 project persistence and trace export are versioned and validated", async () => {
+test("project persistence and trace export are versioned and validated", async () => {
   const [project, component, pkg] = await Promise.all([
     readFile(new URL("frontend/src/project.ts", root), "utf8"),
     readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
     readFile(new URL("package.json", root), "utf8"),
   ]);
-  assert.equal(JSON.parse(pkg).version, "1.1.0");
+  assert.equal(JSON.parse(pkg).version, "1.2.0");
   assert.match(project, /format: "pipeline-lab-project"/);
   assert.match(project, /Unsupported Pipeline Lab project format/);
   assert.match(project, /format: "pipeline-lab-trace"/);
@@ -122,7 +122,7 @@ test("v1.1 project persistence and trace export are versioned and validated", as
   assert.match(component, /Export execution trace/);
 });
 
-test("v1.1 learning center includes guided labs, ISA help, and core-backed comparison", async () => {
+test("learning center includes guided labs, ISA help, and core-backed performance analysis", async () => {
   const [learning, center, component, bindings] = await Promise.all([
     readFile(new URL("frontend/src/learning.ts", root), "utf8"),
     readFile(new URL("frontend/src/LearningCenter.tsx", root), "utf8"),
@@ -131,10 +131,31 @@ test("v1.1 learning center includes guided labs, ISA help, and core-backed compa
   ]);
   for (const id of ["pipeline-basics", "load-use", "branch-recovery", "manual-correctness"]) assert.match(learning, new RegExp(`id: "${id}"`));
   for (const mnemonic of ["ADD", "LW", "BEQ / BNE / BLT", "JAL", "NOP / HALT"]) assert.match(learning, new RegExp(`mnemonic: "${mnemonic.replaceAll("/", "\\/")}"`));
-  assert.match(center, /Run comparison/);
+  assert.match(center, /Performance Lab/);
+  assert.match(center, /Run benchmark/);
   assert.match(component, /createSimulator\(\)/);
   assert.match(component, /Reference mismatch found/);
   assert.match(bindings, /compareReference/);
+});
+
+test("v1.2 performance reports cover release configurations and remain exportable", async () => {
+  const [benchmark, center, component, project] = await Promise.all([
+    readFile(new URL("frontend/src/benchmark.ts", root), "utf8"),
+    readFile(new URL("frontend/src/LearningCenter.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/project.ts", root), "utf8"),
+  ]);
+  for (const kind of ["suite", "forwarding", "prediction", "cache"]) assert.match(benchmark, new RegExp(`"${kind}"`));
+  for (const scenario of ["baseline", "no-forwarding", "always-not-taken", "cache-enabled"]) assert.match(benchmark, new RegExp(`"${scenario}"`));
+  assert.match(benchmark, /format: "pipeline-lab-benchmark"/);
+  assert.match(benchmark, /architecturalMatch/);
+  assert.match(benchmark, /benchmarkCsv/);
+  assert.match(component, /benchmarkScenarios/);
+  assert.match(component, /compareReference\(\)/);
+  assert.match(center, /Cycle comparison chart/);
+  assert.match(center, /Export JSON/);
+  assert.match(center, /Export CSV/);
+  assert.match(project, /export function downloadText/);
 });
 
 test("keyboard and accessibility landmarks are present", async () => {
