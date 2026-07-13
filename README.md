@@ -4,7 +4,18 @@ Pipeline Lab is a browser-based, cycle-accurate laboratory for a small 32-bit RI
 
 ![Pipeline Lab interface](public/og.png)
 
-## What's new in 1.2
+## What's new in 1.3
+
+- Configure predictor-table entries plus cache capacity, block size, associativity, hit latency, and miss penalty from the workbench.
+- Apply every configuration atomically through C++ validation with actionable error messages and no partial reset.
+- Start from five educational microarchitecture presets or save up to 20 named presets privately in the browser.
+- Benchmark the active configuration against every built-in and saved preset with complete JSON and CSV configuration metadata.
+- Import v1 project files with documented defaults and save expanded v2 projects and traces.
+- Preserve delayed EX operands correctly when a long cache miss lets an older producer retire during the stall.
+
+See the [1.3 release notes](docs/release-notes-1.3.md) and [configuration guide](docs/configuration.md) for validation rules, presets, migration, and verification.
+
+## Previously in 1.2
 
 - Run a four-configuration release matrix or focused forwarding, predictor, and cache benchmarks.
 - Compare normalized cycle bars, CPI, hazard stalls, memory stalls, branch recovery, and cache behavior.
@@ -13,7 +24,7 @@ Pipeline Lab is a browser-based, cycle-accurate laboratory for a small 32-bit RI
 - Trust a repeatable Chromium stress suite that exercises all examples, controls, inspectors, downloads, hazards, faults, stepping, and undo/replay.
 - Edit registers and memory safely whenever continuous execution is paused, including coherent edits to resident cache lines.
 
-See the [1.2 release notes](docs/release-notes-1.2.md) for bug fixes and the complete acceptance matrix.
+See the [1.2 release notes](docs/release-notes-1.2.md) for the Performance Lab, browser stress suite, and its complete acceptance matrix.
 
 ## Previously in 1.1
 
@@ -33,11 +44,11 @@ See the [1.1 release notes](docs/release-notes-1.1.md) for shortcuts, compatibil
 - Full ISA, non-pipelined reference interpreter, dynamic instruction IDs, deterministic replay, and 500-cycle undo.
 - Full forwarding, no-forwarding interlocks, and intentionally unsafe manual scheduling mode.
 - EX-resolved control flow with always-taken, always-not-taken, one-bit, and two-bit predictors.
-- Optional set-associative LRU, write-back, write-allocate data cache with configurable timing in the C++ API.
+- Optional set-associative LRU, write-back, write-allocate data cache with validated geometry and timing controls in both the C++ API and UI.
 - Structured C++ events for stalls, bubbles, forwarding, cache misses, flushes, writes, faults, predictor updates, and HALT.
 - Assembly editor with highlighting, breakpoint/current-PC gutter, six-stage cards, timeline, datapath, state inspectors, event explanations, configuration controls, and 12 teaching examples.
 - Versioned project import/export, browser-local drafts, and complete JSON execution traces.
-- Guided checkpoint labs, searchable ISA help, C++ reference-result diagnostics, and a multi-configuration Performance Lab.
+- Guided checkpoint labs, searchable ISA help, C++ reference-result diagnostics, named microarchitecture presets, and a custom multi-configuration Performance Lab.
 - Keyboard navigation, visible focus, reduced-motion handling, accessible tabs/dialogs, and comfortable/compact display densities.
 
 ## Architecture
@@ -50,7 +61,7 @@ React controls ──JSON/Embind──> C++ six-stage engine
        └──── state / events / timeline ────┘
 ```
 
-The native and WebAssembly builds compile `core/src/core.cpp`. TypeScript only owns presentation, timers, and user interaction. See [architecture.md](docs/architecture.md), [isa.md](docs/isa.md), [pipeline-semantics.md](docs/pipeline-semantics.md), [browser support](docs/browser-support.md), and the [1.2 release notes](docs/release-notes-1.2.md).
+The native and WebAssembly builds compile `core/src/core.cpp`. TypeScript only owns presentation, timers, and user interaction. See [architecture.md](docs/architecture.md), [configuration.md](docs/configuration.md), [isa.md](docs/isa.md), [pipeline-semantics.md](docs/pipeline-semantics.md), [browser support](docs/browser-support.md), and the [1.3 release notes](docs/release-notes-1.3.md).
 
 ## Quick start
 
@@ -161,7 +172,8 @@ tests/e2e/            Full Chromium interaction and deterministic replay suite
 
 ## Known limitations
 
-- Cache geometry and timing are configurable in the C++ configuration object; the current UI exposes the validated default geometry and an enable switch rather than every numeric cache field.
+- The simulator models one optional data cache; instruction-cache and shared-bus contention are not implemented yet.
+- Presets saved through the UI are browser-local preferences. Portable project files contain the active configuration but not the complete local preset library.
 - Undo retains 500 pre-cycle snapshots. Long timeline history remains visible for the current run, while the UI renders the most recent 40 dynamic instructions and 28 cycles at once.
 - Memory edits are byte/word oriented; there is no file import/export yet.
 - The optional datapath is an educational block diagram, not an RTL schematic.

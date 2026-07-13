@@ -120,6 +120,83 @@ int main() {
   test("paused memory patches remain coherent with resident cache lines", [] {
     Configuration cfg;cfg.cacheCapacity=16;cfg.cacheBlockSize=4;cfg.cacheAssociativity=1;DataCache c;c.reset(cfg);std::vector<uint8_t> mem(64,0);mem[0]=1;c.beginAccess(0,false,mem);CHECK(c.readWord(0)==1);auto reads=c.stats().reads;c.patchByte(0,9);CHECK(c.readWord(0)==9);CHECK(c.stats().reads==reads);
   });
+  test("complete microarchitecture configuration is validated and serialized", [] {
+    Simulator s;CHECK(s.loadProgram("HALT\n"));
+    const std::string cfg="{\"forwarding\":\"none\",\"predictor\":\"one-bit\",\"predictorEntries\":64,\"cacheEnabled\":true,\"cacheCapacity\":1024,\"cacheBlockSize\":32,\"cacheAssociativity\":4,\"cacheHitLatency\":3,\"cacheMissPenalty\":21}";
+    CHECK(s.validateConfigurationJson(cfg).find("\"ok\":true")!=std::string::npos);
+    CHECK(s.applyConfigurationJson(cfg).find("\"ok\":true")!=std::string::npos);
+    const auto state=s.getState();
+    CHECK(state.find("\"forwarding\":\"none\"")!=std::string::npos);CHECK(state.find("\"predictor\":\"one-bit\"")!=std::string::npos);CHECK(state.find("\"predictorEntries\":64")!=std::string::npos);
+    CHECK(state.find("\"cacheCapacity\":1024")!=std::string::npos);CHECK(state.find("\"cacheBlockSize\":32")!=std::string::npos);CHECK(state.find("\"cacheAssociativity\":4")!=std::string::npos);CHECK(state.find("\"cacheHitLatency\":3")!=std::string::npos);CHECK(state.find("\"cacheMissPenalty\":21")!=std::string::npos);
+  });
+  test("invalid configuration is rejected atomically with actionable errors", [] {
+    Simulator s;CHECK(s.loadProgram("ADDI r1,r0,1\nHALT\n"));s.stepCycle();const auto before=s.getState();
+    const std::string invalid="{\"predictorEntries\":3,\"cacheEnabled\":\"true\",\"cacheCapacity\":96,\"cacheBlockSize\":6,\"cacheAssociativity\":3,\"cacheHitLatency\":0,\"cacheMissPenalty\":0}";
+    const auto validation=s.validateConfigurationJson(invalid);CHECK(validation.find("\"ok\":false")!=std::string::npos);CHECK(validation.find("power of two")!=std::string::npos);CHECK(validation.find("must be boolean")!=std::string::npos);
+    const auto applied=s.applyConfigurationJson(invalid);CHECK(applied.find("\"ok\":false")!=std::string::npos);CHECK(s.getState()==before);
+    CHECK(s.validateConfigurationJson("{\"predictorEntries\":\"16\"}").find("unsigned integer")!=std::string::npos);
+    CHECK(s.validateConfigurationJson("{\"madeUpTiming\":4}").find("Unknown processor configuration field")!=std::string::npos);
+    CHECK(s.validateConfigurationJson("{\"forwarding\":\"full\" trailing}").find("malformed JSON")!=std::string::npos);
+  });
+  test("legacy sparse configuration receives documented defaults", [] {
+    Simulator s;CHECK(s.loadProgram("HALT\n"));CHECK(s.applyConfigurationJson("{\"forwarding\":\"none\",\"cacheEnabled\":true}").find("\"ok\":true")!=std::string::npos);const auto state=s.getState();
+    CHECK(state.find("\"predictorEntries\":16")!=std::string::npos);CHECK(state.find("\"cacheCapacity\":256")!=std::string::npos);CHECK(state.find("\"cacheBlockSize\":16")!=std::string::npos);CHECK(state.find("\"cacheAssociativity\":2")!=std::string::npos);CHECK(state.find("\"cacheHitLatency\":1")!=std::string::npos);CHECK(state.find("\"cacheMissPenalty\":8")!=std::string::npos);
+  });
+  test("configured cache timing changes pipeline memory stalls", [] {
+    const std::string source="LI r1,1024\nLI r2,5\nSW r2,0(r1)\nLW r3,0(r1)\nHALT\n";
+    auto execute=[&](uint32_t penalty){Simulator s;CHECK(s.loadProgram(source));const auto cfg="{\"cacheEnabled\":true,\"cacheCapacity\":64,\"cacheBlockSize\":16,\"cacheAssociativity\":1,\"cacheHitLatency\":1,\"cacheMissPenalty\":"+std::to_string(penalty)+"}";CHECK(s.applyConfigurationJson(cfg).find("\"ok\":true")!=std::string::npos);s.runUntilCompletion();CHECK(s.isHalted());CHECK(s.registers()[3]==5);return s.statistics().memoryStallCycles;};
+    const auto fast=execute(2),slow=execute(10);CHECK(slow>fast);CHECK(slow-fast==8);
+  });
+  test("configuration boundaries and malformed trailing commas are strict", [] {
+    Simulator s;
+    for(const auto value:{1,1024})CHECK(s.validateConfigurationJson("{\"predictorEntries\":"+std::to_string(value)+"}").find("\"ok\":true")!=std::string::npos);
+    for(const auto value:{0,1025})CHECK(s.validateConfigurationJson("{\"predictorEntries\":"+std::to_string(value)+"}").find("\"ok\":false")!=std::string::npos);
+    CHECK(s.validateConfigurationJson("{\"cacheCapacity\":16,\"cacheBlockSize\":4,\"cacheAssociativity\":1}").find("\"ok\":true")!=std::string::npos);
+    CHECK(s.validateConfigurationJson("{\"cacheCapacity\":65536,\"cacheBlockSize\":256,\"cacheAssociativity\":16}").find("\"ok\":true")!=std::string::npos);
+    CHECK(s.validateConfigurationJson("{\"cacheCapacity\":16,\"cacheBlockSize\":16,\"cacheAssociativity\":2}").find("whole number of sets")!=std::string::npos);
+    CHECK(s.validateConfigurationJson("{\"cacheEnabled\":true,}").find("trailing comma")!=std::string::npos);
+    CHECK(s.validateConfigurationJson("{\"x\":1,}").find("trailing comma")!=std::string::npos);
+  });
+  test("cache latency accounting is exact", [] {
+    Simulator s;CHECK(s.loadProgram("LI r1,1024\nLW r2,0(r1)\nLW r3,0(r1)\nHALT\n"));CHECK(s.applyConfigurationJson("{\"cacheEnabled\":true,\"cacheCapacity\":64,\"cacheBlockSize\":16,\"cacheAssociativity\":1,\"cacheHitLatency\":3,\"cacheMissPenalty\":7}").find("\"ok\":true")!=std::string::npos);s.runUntilCompletion();
+    CHECK(s.statistics().memoryStallCycles==11);CHECK(s.getState().find("\"stallCycles\":11")!=std::string::npos);
+  });
+  test("multi-way cache uses LRU and writes back dirty victims", [] {
+    Configuration cfg;cfg.cacheEnabled=true;cfg.cacheCapacity=32;cfg.cacheBlockSize=8;cfg.cacheAssociativity=2;DataCache cache;cache.reset(cfg);std::vector<uint8_t> memory(128,0);
+    cache.beginAccess(0,true,memory);cache.writeWord(0,0x12345678);cache.beginAccess(16,false,memory);cache.beginAccess(32,false,memory);
+    CHECK(cache.stats().dirtyWritebacks==1);CHECK(memory[0]==0x78&&memory[3]==0x12);
+  });
+  test("predictor resizing preserves indexing and tag-based alias safety", [] {
+    BranchPredictor p;p.reset(PredictorMode::TwoBit,1);p.update(0,true);p.update(0,true);CHECK(p.predict(0));CHECK(!p.predict(4));p.update(4,true);CHECK(!p.predict(0));CHECK(p.entries().size()==1);p.reset(PredictorMode::OneBit,1024);CHECK(p.entries().size()==1024);
+  });
+  test("write-back cache is coherent for inspection and reference comparison", [] {
+    Simulator s;CHECK(s.loadProgram("LI r1,1024\nLI r2,42\nSW r2,0(r1)\nLW r3,0(r1)\nHALT\n"));CHECK(s.applyConfigurationJson("{\"cacheEnabled\":true,\"cacheCapacity\":64,\"cacheBlockSize\":16,\"cacheAssociativity\":1}").find("\"ok\":true")!=std::string::npos);s.runUntilCompletion();
+    CHECK(s.memory()[1024]==0);CHECK(s.readMemory(1024,4)=="[42,0,0,0]");auto comparison=s.compareReference();CHECK(comparison.find("\"matches\":true")!=std::string::npos);CHECK(comparison.find("\"memoryDifferences\":[]")!=std::string::npos);
+  });
+  test("reference comparison includes initialized state and memory-only hazards", [] {
+    Simulator initialized;CHECK(initialized.loadProgram("LI r1,1024\nLW r2,0(r1)\nADD r3,r2,r2\nHALT\n"));CHECK(initialized.writeMemory(1024,"7,0,0,0"));initialized.setRegister(8,99);initialized.runUntilCompletion();CHECK(initialized.registers()[3]==14);CHECK(initialized.compareReference().find("\"matches\":true")!=std::string::npos);
+    Simulator manual;CHECK(manual.loadProgram("LI r1,1024\nNOP\nNOP\nNOP\nNOP\nLI r2,42\nSW r2,0(r1)\nHALT\n"));CHECK(manual.applyConfigurationJson("{\"forwarding\":\"manual\"}").find("\"ok\":true")!=std::string::npos);manual.runUntilCompletion();auto mismatch=manual.compareReference();CHECK(mismatch.find("\"differences\":[]")!=std::string::npos);CHECK(mismatch.find("\"memoryDifferences\":[{")!=std::string::npos);CHECK(mismatch.find("\"matches\":false")!=std::string::npos);
+  });
+  test("mid-run architectural edits explicitly disable reference comparison", [] {
+    Simulator s;CHECK(s.loadProgram("ADDI r1,r0,1\nHALT\n"));s.stepCycle();s.setRegister(7,9);s.runUntilCompletion();auto result=s.compareReference();CHECK(result.find("\"comparable\":false")!=std::string::npos);CHECK(result.find("mid-run")!=std::string::npos);
+  });
+  test("invalid cached access faults before cache mutation", [] {
+    Simulator s;CHECK(s.loadProgram("LW r1,2(r0)\nHALT\n"));CHECK(s.applyConfigurationJson("{\"cacheEnabled\":true,\"cacheMissPenalty\":1000}").find("\"ok\":true")!=std::string::npos);s.runUntilCompletion();auto state=s.getState();CHECK(state.find("\"faulted\":true")!=std::string::npos);CHECK(state.find("\"reads\":0")!=std::string::npos);CHECK(s.statistics().memoryStallCycles==0);
+  });
+  test("maximum cache geometry emits a bounded state preview", [] {
+    Simulator s;CHECK(s.loadProgram("HALT\n"));CHECK(s.applyConfigurationJson("{\"cacheEnabled\":true,\"cacheCapacity\":65536,\"cacheBlockSize\":4,\"cacheAssociativity\":1}").find("\"ok\":true")!=std::string::npos);const auto state=s.getState();CHECK(state.find("\"totalSets\":16384")!=std::string::npos);CHECK(state.find("\"visibleSetIndices\":[0,1,2")!=std::string::npos);CHECK(state.size()<500000);
+  });
+  test("breakpoints survive reset and cache-miss undo replays exactly", [] {
+    Simulator breakpoint;CHECK(breakpoint.loadProgram("NOP\nHALT\n"));breakpoint.setBreakpoint(4,true);breakpoint.reset();CHECK(breakpoint.getState().find("\"breakpoints\":[4]")!=std::string::npos);breakpoint.runUntilBreakpoint();CHECK(breakpoint.getState().find("\"status\":\"breakpoint\"")!=std::string::npos);
+    Simulator cache;CHECK(cache.loadProgram("LI r1,1024\nLW r2,0(r1)\nHALT\n"));CHECK(cache.applyConfigurationJson("{\"cacheEnabled\":true,\"cacheMissPenalty\":8}").find("\"ok\":true")!=std::string::npos);while(cache.statistics().memoryStallCycles==0)cache.stepCycle();const auto expectedState=cache.getState(),expectedTimeline=cache.getTimeline();CHECK(cache.restorePreviousCycle());cache.stepCycle();CHECK(cache.getState()==expectedState);CHECK(cache.getTimeline()==expectedTimeline);
+  });
+  test("program image capacity and cycle limit fail safely", [] {
+    std::string exact,overflow;for(int i=0;i<16384;++i)exact+="NOP\n";overflow=exact+"NOP\n";CHECK(Assembler{}.assemble(exact).ok());auto tooLarge=Assembler{}.assemble(overflow);CHECK(!tooLarge.ok());CHECK(tooLarge.errors.back().message.find("64 KiB")!=std::string::npos);
+    Simulator loop;CHECK(loop.loadProgram("loop: J loop\n"));loop.runUntilCompletion(100000);CHECK(loop.getState().find("\"faulted\":true")!=std::string::npos);CHECK(loop.getState().find("Cycle limit reached")!=std::string::npos);CHECK(!loop.restorePreviousCycle());CHECK(loop.getTimeline().find("\"cycle\":1,")==std::string::npos);
+  });
+  test("bounded timeline remains deterministic across undo at capacity", [] {
+    std::string source;for(int i=0;i<1100;++i)source+="NOP\n";source+="HALT\n";Simulator s;CHECK(s.loadProgram(source));s.runCycles(1001);const auto expectedState=s.getState(),expectedTimeline=s.getTimeline();CHECK(expectedTimeline.find("\"cycle\":1,")==std::string::npos);CHECK(s.restorePreviousCycle());s.stepCycle();CHECK(s.getState()==expectedState);CHECK(s.getTimeline()==expectedTimeline);
+  });
   test("reset and replay are deterministic", [] {
     Simulator s;CHECK(s.loadProgram("LI r1,3\nADDI r2,r1,4\nHALT\n"));s.runUntilCompletion();auto first=s.getState();s.reset();s.runUntilCompletion();CHECK(s.getState()==first);
   });

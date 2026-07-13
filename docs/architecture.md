@@ -6,6 +6,8 @@
 
 The Embind layer exposes value-oriented operations returning JSON strings. No C++ pointer crosses the boundary. `frontend/src/types.ts` documents the serialized contract. React may schedule calls and render results but never calculates a CPU result.
 
+Configuration follows the same boundary. `validateConfigurationJson` parses and validates a candidate without mutation; `applyConfigurationJson` repeats validation, commits the complete configuration, and resets only on success. The serialized state echoes every applied predictor and cache field. TypeScript owns preset names and browser-local persistence, but not processor validation or timing.
+
 The browser module uses a fixed 128 MiB WebAssembly memory. This avoids resizable-buffer incompatibilities in browser `TextDecoder` implementations while retaining enough space for the bounded 500-cycle snapshot history.
 
 ## Core components

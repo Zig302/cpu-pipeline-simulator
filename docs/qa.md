@@ -23,7 +23,7 @@ Pipeline Lab has separate checks for the native CPU model, the WebAssembly bound
 | `npm run qa:prod` | Serves the production Cloudflare output through local Wrangler and checks fingerprinted HTML, JS, CSS, WASM, status codes, and MIME types |
 | `npm run qa:all` | WebAssembly verification, production build/tests, typecheck, lint, both server suites, and the Chromium stress suite |
 
-The native suite covers assembler validation and encoding, all instruction classes, immediate limits, r0, dependency and forwarding cases, load-use and store-data hazards, no-forwarding and manual modes, branch flushing, loops and generated reference-model parity, undo/replay, pipeline fill/drain, predictor transitions, cache eviction/writeback, paused-edit atomicity and cache coherence, deterministic reset, and alignment faults.
+The native suite covers assembler validation and encoding, all instruction classes, immediate limits, r0, dependency and forwarding cases, load-use and store-data hazards, no-forwarding and manual modes, branch flushing, loops and generated reference-model parity, undo/replay, pipeline fill/drain, predictor transitions, cache eviction/writeback, paused-edit atomicity and cache coherence, complete configuration validation/serialization, rejected-configuration atomicity, legacy defaults, configurable cache timing, delayed-EX operand preservation, deterministic reset, and alignment faults.
 
 ## Interactive browser acceptance checklist
 
@@ -41,6 +41,10 @@ Run `npm run dev`, open `http://localhost:3000`, and verify these workflows afte
 10. Edit a paused memory word and confirm its little-endian byte representation.
 11. Execute an unaligned `LW` and confirm the simulator enters fault state with a structured MEM2 event.
 12. Confirm the browser console and development-server log contain no initialization, decode, asset-loading, or `EPERM` errors.
+13. Load each built-in microarchitecture preset and confirm its geometry preview, predictor row count, and cache set/way visualization agree.
+14. Attempt a three-entry predictor or inconsistent cache geometry and confirm the core rejects it without changing the running CPU.
+15. Save, reload, update, and delete a named browser preset; import a v1 project and confirm the advanced fields receive documented defaults.
+16. Run **Current + presets** and confirm every configuration is listed, architecturally verified, and fully represented in JSON and CSV exports.
 
 ## Release gate
 

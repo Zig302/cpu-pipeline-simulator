@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -81,6 +82,7 @@ uint32_t readLE(const std::vector<uint8_t>& mem, uint32_t a) {
 }
 
 void writeLE(std::vector<uint8_t>& mem, uint32_t a, uint32_t v) {
+  if (uint64_t(a) + 4 > mem.size()) return;
   mem[a] = uint8_t(v); mem[a+1] = uint8_t(v >> 8); mem[a+2] = uint8_t(v >> 16); mem[a+3] = uint8_t(v >> 24);
 }
 
@@ -91,6 +93,164 @@ std::string forwardingName(ForwardingMode m) {
 }
 std::string predictorName(PredictorMode m) {
   switch (m) { case PredictorMode::AlwaysNotTaken: return "always-not-taken"; case PredictorMode::AlwaysTaken: return "always-taken"; case PredictorMode::OneBit: return "one-bit"; default: return "two-bit"; }
+}
+
+struct ConfigurationParseResult {
+  Configuration configuration{};
+  std::vector<std::string> errors;
+};
+
+struct JsonFieldToken { std::string value; bool quoted{false}; };
+
+void validateConfigurationObjectShape(const std::string& json, std::vector<std::string>& errors) {
+  static const std::set<std::string> allowed = {"forwarding", "predictor", "predictorEntries", "cacheEnabled", "cacheCapacity", "cacheBlockSize", "cacheAssociativity", "cacheHitLatency", "cacheMissPenalty"};
+  size_t position = 1;
+  const auto skipWhitespace = [&]() { while (position < json.size() && std::isspace(static_cast<unsigned char>(json[position]))) ++position; };
+  while (position + 1 < json.size()) {
+    skipWhitespace();
+    if (position + 1 == json.size()) return;
+    if (json[position] != '"') { errors.push_back("Processor configuration contains malformed JSON."); return; }
+    const auto keyEnd = json.find('"', position + 1);
+    if (keyEnd == std::string::npos) { errors.push_back("Processor configuration contains an unterminated field name."); return; }
+    const auto key = json.substr(position + 1, keyEnd - position - 1);
+    if (!allowed.count(key)) errors.push_back("Unknown processor configuration field '" + key + "'.");
+    position = keyEnd + 1; skipWhitespace();
+    if (position >= json.size() || json[position] != ':') { errors.push_back("Configuration field '" + key + "' has no value separator."); return; }
+    ++position; skipWhitespace();
+    if (position >= json.size()) { errors.push_back("Configuration field '" + key + "' has no value."); return; }
+    if (json[position] == '"') {
+      const auto valueEnd = json.find('"', position + 1);
+      if (valueEnd == std::string::npos) { errors.push_back("Configuration field '" + key + "' contains an unterminated string."); return; }
+      position = valueEnd + 1;
+    } else {
+      const auto valueEnd = json.find_first_of(",}", position);
+      if (trim(json.substr(position, valueEnd == std::string::npos ? std::string::npos : valueEnd - position)).empty()) { errors.push_back("Configuration field '" + key + "' has no value."); return; }
+      position = valueEnd == std::string::npos ? json.size() : valueEnd;
+    }
+    skipWhitespace();
+    if (position + 1 == json.size() && json[position] == '}') return;
+    if (position >= json.size() || json[position] != ',') { errors.push_back("Processor configuration contains malformed JSON after field '" + key + "'."); return; }
+    ++position; skipWhitespace();
+    if (position >= json.size() || json[position] != '"') { errors.push_back("Processor configuration contains a trailing comma or malformed field."); return; }
+  }
+}
+
+std::optional<JsonFieldToken> jsonField(const std::string& json, const std::string& key, std::vector<std::string>& errors) {
+  const std::string needle = "\"" + key + "\"";
+  const auto keyPosition = json.find(needle);
+  if (keyPosition == std::string::npos) return std::nullopt;
+  if (json.find(needle, keyPosition + needle.size()) != std::string::npos) {
+    errors.push_back("Configuration field '" + key + "' appears more than once.");
+    return std::nullopt;
+  }
+  auto position = json.find(':', keyPosition + needle.size());
+  if (position == std::string::npos) {
+    errors.push_back("Configuration field '" + key + "' has no value.");
+    return std::nullopt;
+  }
+  ++position;
+  while (position < json.size() && std::isspace(static_cast<unsigned char>(json[position]))) ++position;
+  if (position >= json.size()) {
+    errors.push_back("Configuration field '" + key + "' has no value.");
+    return std::nullopt;
+  }
+  if (json[position] == '"') {
+    const auto end = json.find('"', position + 1);
+    if (end == std::string::npos) {
+      errors.push_back("Configuration field '" + key + "' contains an unterminated string.");
+      return std::nullopt;
+    }
+    return JsonFieldToken{json.substr(position + 1, end - position - 1), true};
+  }
+  const auto end = json.find_first_of(",}", position);
+  return JsonFieldToken{trim(json.substr(position, end == std::string::npos ? std::string::npos : end - position)), false};
+}
+
+bool parseUnsignedField(const std::string& json, const std::string& key, uint32_t& value, std::vector<std::string>& errors) {
+  const auto field = jsonField(json, key, errors);
+  if (!field) return true;
+  uint64_t parsed = 0;
+  const auto conversion = std::from_chars(field->value.data(), field->value.data() + field->value.size(), parsed);
+  if (field->quoted || field->value.empty() || conversion.ec != std::errc{} || conversion.ptr != field->value.data() + field->value.size() || parsed > std::numeric_limits<uint32_t>::max()) {
+    errors.push_back("Configuration field '" + key + "' must be an unsigned integer.");
+    return false;
+  }
+  value = static_cast<uint32_t>(parsed);
+  return true;
+}
+
+bool isPowerOfTwo(uint32_t value) { return value != 0 && (value & (value - 1)) == 0; }
+
+ConfigurationParseResult parseConfiguration(const std::string& json) {
+  ConfigurationParseResult result;
+  const auto cleaned = trim(json);
+  if (cleaned.size() < 2 || cleaned.front() != '{' || cleaned.back() != '}') {
+    result.errors.push_back("Processor configuration must be a JSON object.");
+    return result;
+  }
+  validateConfigurationObjectShape(cleaned, result.errors);
+
+  if (const auto field = jsonField(cleaned, "forwarding", result.errors)) {
+    if (!field->quoted) result.errors.push_back("Configuration field 'forwarding' must be a string.");
+    else if (field->value == "full") result.configuration.forwarding = ForwardingMode::Full;
+    else if (field->value == "none") result.configuration.forwarding = ForwardingMode::None;
+    else if (field->value == "manual") result.configuration.forwarding = ForwardingMode::Manual;
+    else result.errors.push_back("Hazard handling must be 'full', 'none', or 'manual'.");
+  }
+  if (const auto field = jsonField(cleaned, "predictor", result.errors)) {
+    if (!field->quoted) result.errors.push_back("Configuration field 'predictor' must be a string.");
+    else if (field->value == "always-not-taken") result.configuration.predictor = PredictorMode::AlwaysNotTaken;
+    else if (field->value == "always-taken") result.configuration.predictor = PredictorMode::AlwaysTaken;
+    else if (field->value == "one-bit") result.configuration.predictor = PredictorMode::OneBit;
+    else if (field->value == "two-bit") result.configuration.predictor = PredictorMode::TwoBit;
+    else result.errors.push_back("Branch predictor mode is not recognized.");
+  }
+  if (const auto field = jsonField(cleaned, "cacheEnabled", result.errors)) {
+    if (!field->quoted && field->value == "true") result.configuration.cacheEnabled = true;
+    else if (!field->quoted && field->value == "false") result.configuration.cacheEnabled = false;
+    else result.errors.push_back("Configuration field 'cacheEnabled' must be boolean.");
+  }
+  parseUnsignedField(cleaned, "predictorEntries", result.configuration.predictorEntries, result.errors);
+  parseUnsignedField(cleaned, "cacheCapacity", result.configuration.cacheCapacity, result.errors);
+  parseUnsignedField(cleaned, "cacheBlockSize", result.configuration.cacheBlockSize, result.errors);
+  parseUnsignedField(cleaned, "cacheAssociativity", result.configuration.cacheAssociativity, result.errors);
+  parseUnsignedField(cleaned, "cacheHitLatency", result.configuration.cacheHitLatency, result.errors);
+  parseUnsignedField(cleaned, "cacheMissPenalty", result.configuration.cacheMissPenalty, result.errors);
+
+  if (!isPowerOfTwo(result.configuration.predictorEntries) || result.configuration.predictorEntries > 1024) result.errors.push_back("Predictor entries must be a power of two from 1 to 1024.");
+  if (!isPowerOfTwo(result.configuration.cacheCapacity) || result.configuration.cacheCapacity < 16 || result.configuration.cacheCapacity > 65536) result.errors.push_back("Cache capacity must be a power of two from 16 to 65536 bytes.");
+  if (!isPowerOfTwo(result.configuration.cacheBlockSize) || result.configuration.cacheBlockSize < 4 || result.configuration.cacheBlockSize > 256) result.errors.push_back("Cache block size must be a power of two from 4 to 256 bytes.");
+  if (!isPowerOfTwo(result.configuration.cacheAssociativity) || result.configuration.cacheAssociativity > 16) result.errors.push_back("Cache associativity must be a power of two from 1 to 16 ways.");
+  const uint64_t wayBytes = uint64_t(result.configuration.cacheBlockSize) * result.configuration.cacheAssociativity;
+  if (wayBytes > result.configuration.cacheCapacity || result.configuration.cacheCapacity % wayBytes != 0) result.errors.push_back("Cache capacity must contain a whole number of sets for the selected block size and associativity.");
+  if (result.configuration.cacheHitLatency < 1 || result.configuration.cacheHitLatency > 20) result.errors.push_back("Cache hit latency must be from 1 to 20 cycles.");
+  if (result.configuration.cacheMissPenalty < 1 || result.configuration.cacheMissPenalty > 1000) result.errors.push_back("Cache miss penalty must be from 1 to 1000 cycles.");
+  return result;
+}
+
+std::string configurationJson(const Configuration& configuration) {
+  std::ostringstream out;
+  out << "{\"forwarding\":\"" << forwardingName(configuration.forwarding)
+      << "\",\"predictor\":\"" << predictorName(configuration.predictor)
+      << "\",\"predictorEntries\":" << configuration.predictorEntries
+      << ",\"cacheEnabled\":" << (configuration.cacheEnabled ? "true" : "false")
+      << ",\"cacheCapacity\":" << configuration.cacheCapacity
+      << ",\"cacheBlockSize\":" << configuration.cacheBlockSize
+      << ",\"cacheAssociativity\":" << configuration.cacheAssociativity
+      << ",\"cacheHitLatency\":" << configuration.cacheHitLatency
+      << ",\"cacheMissPenalty\":" << configuration.cacheMissPenalty << '}';
+  return out.str();
+}
+
+std::string configurationResultJson(const ConfigurationParseResult& result) {
+  std::ostringstream out;
+  out << "{\"ok\":" << (result.errors.empty() ? "true" : "false") << ",\"configuration\":" << configurationJson(result.configuration) << ",\"errors\":[";
+  for (size_t index = 0; index < result.errors.size(); ++index) {
+    if (index) out << ',';
+    out << "\"" << jsonEscape(result.errors[index]) << "\"";
+  }
+  out << "]}";
+  return out.str();
 }
 
 }  // namespace
@@ -200,6 +360,7 @@ Program Assembler::assemble(const std::string& source) const {
     else if(op=="JR") { if(count(2)&&reg(1,a)) emit(encodeJ(Op::JR,a,0),ln.text,ln.number); }
     else err(ln.number,"Unknown instruction '"+t[0]+"'");
   }
+  if (uint64_t(p.words.size()) * 4 > Configuration{}.memoryBytes) p.errors.push_back({p.sourceLines.empty()?1:p.sourceLines.back(),1,"Program image exceeds the 64 KiB instruction-memory capacity."});
   return p;
 }
 
@@ -232,6 +393,8 @@ uint32_t DataCache::beginAccess(uint32_t a,bool wr,std::vector<uint8_t>& mem) {
 uint32_t DataCache::readWord(uint32_t a) const { uint32_t block=a/cfg_.cacheBlockSize,set=uint32_t(block%sets_.size()),tag=uint32_t(block/sets_.size()),off=a%cfg_.cacheBlockSize;for(const auto&l:sets_[set])if(l.valid&&l.tag==tag)return uint32_t(l.data[off])|(uint32_t(l.data[off+1])<<8)|(uint32_t(l.data[off+2])<<16)|(uint32_t(l.data[off+3])<<24);return 0; }
 void DataCache::writeWord(uint32_t a,uint32_t v) { if(auto*l=find(a)){uint32_t o=a%cfg_.cacheBlockSize;l->data[o]=uint8_t(v);l->data[o+1]=uint8_t(v>>8);l->data[o+2]=uint8_t(v>>16);l->data[o+3]=uint8_t(v>>24);l->dirty=true;l->lru=++tick_;} }
 void DataCache::patchByte(uint32_t a,uint8_t v){if(auto*l=find(a))l->data[a%cfg_.cacheBlockSize]=v;}
+uint8_t DataCache::inspectByte(uint32_t a,const std::vector<uint8_t>& mem)const{if(a>=mem.size()||sets_.empty())return 0;uint32_t block=a/cfg_.cacheBlockSize,set=uint32_t(block%sets_.size()),tag=uint32_t(block/sets_.size()),off=a%cfg_.cacheBlockSize;for(const auto&l:sets_[set])if(l.valid&&l.tag==tag&&off<l.data.size())return l.data[off];return mem[a];}
+void DataCache::overlayMemory(std::vector<uint8_t>& mem)const{for(size_t set=0;set<sets_.size();++set)for(const auto&l:sets_[set])if(l.valid){uint64_t base=((uint64_t(l.tag)*sets_.size())+set)*cfg_.cacheBlockSize;for(size_t i=0;i<l.data.size()&&base+i<mem.size();++i)mem[base+i]=l.data[i];}}
 
 Simulator::Simulator(){ reset(); }
 std::string Simulator::assemble(const std::string& source) {
@@ -241,18 +404,26 @@ bool Simulator::loadProgram(const std::string& source) { auto p=Assembler{}.asse
 
 void Simulator::reset() {
   regs_.fill(0); memory_.assign(std::max(1024u,cfg_.memoryBytes),0); regs_[29]=std::min<uint32_t>(cfg_.initialStackPointer,uint32_t(memory_.size()-4));pc_=0;nextId_=1;
-  ifid_={};idex_={};exmem1_={};mem1mem2_={};mem2wb_={};stats_={};events_.clear();timeline_.clear();history_.clear();breakpoints_.clear();halted_=fetchStopped_=faulted_=false;status_=program_.ok()?"ready":"assembly-error";memWait_=0;memAccessStarted_=false;
+  ifid_={};idex_={};exmem1_={};mem1mem2_={};mem2wb_={};stats_={};events_.clear();timeline_.clear();history_.clear();halted_=fetchStopped_=faulted_=false;status_=program_.ok()?"ready":"assembly-error";memWait_=0;memAccessStarted_=false;
   predictor_.reset(cfg_.predictor,cfg_.predictorEntries);cache_.reset(cfg_);
   for(size_t i=0;i<program_.words.size();++i)writeLE(memory_,uint32_t(i*4),program_.words[i]);
+  initialRegs_=regs_;initialMemory_=memory_;referenceComparable_=true;
 }
 void Simulator::resetWithJson(const std::string& j) {
-  auto has=[&](const std::string& s){return j.find(s)!=std::string::npos;};
-  if(has("\"forwarding\":\"none\""))cfg_.forwarding=ForwardingMode::None;else if(has("\"forwarding\":\"manual\""))cfg_.forwarding=ForwardingMode::Manual;else cfg_.forwarding=ForwardingMode::Full;
-  if(has("always-not-taken"))cfg_.predictor=PredictorMode::AlwaysNotTaken;else if(has("always-taken"))cfg_.predictor=PredictorMode::AlwaysTaken;else if(has("one-bit"))cfg_.predictor=PredictorMode::OneBit;else cfg_.predictor=PredictorMode::TwoBit;
-  cfg_.cacheEnabled=has("\"cacheEnabled\":true"); reset();
+  (void)applyConfigurationJson(j);
 }
-void Simulator::snapshot(){Snapshot s;s.regs=regs_;s.memory=memory_;s.pc=pc_;s.nextId=nextId_;s.ifid=ifid_;s.idex=idex_;s.exmem1=exmem1_;s.mem1mem2=mem1mem2_;s.mem2wb=mem2wb_;s.stats=stats_;s.predictor=predictor_;s.cache=cache_;s.halted=halted_;s.fetchStopped=fetchStopped_;s.faulted=faulted_;s.status=status_;s.memWait=memWait_;s.memAccessStarted=memAccessStarted_;s.timelineSize=timeline_.size();history_.push_back(std::move(s));if(history_.size()>500)history_.pop_front();}
-bool Simulator::restorePreviousCycle(){if(history_.empty())return false;auto s=std::move(history_.back());history_.pop_back();regs_=s.regs;memory_=std::move(s.memory);pc_=s.pc;nextId_=s.nextId;ifid_=s.ifid;idex_=s.idex;exmem1_=s.exmem1;mem1mem2_=s.mem1mem2;mem2wb_=s.mem2wb;stats_=s.stats;predictor_=s.predictor;cache_=s.cache;halted_=s.halted;fetchStopped_=s.fetchStopped;faulted_=s.faulted;status_=s.status;memWait_=s.memWait;memAccessStarted_=s.memAccessStarted;timeline_.resize(s.timelineSize);events_.clear();events_.push_back({"undo",stats_.cycles,"",{},-1,"","Restored the previous deterministic cycle snapshot."});return true;}
+std::string Simulator::validateConfigurationJson(const std::string& j) const {
+  return configurationResultJson(parseConfiguration(j));
+}
+std::string Simulator::applyConfigurationJson(const std::string& j) {
+  auto parsed = parseConfiguration(j);
+  if (!parsed.errors.empty()) return configurationResultJson(parsed);
+  cfg_ = parsed.configuration;
+  reset();
+  return configurationResultJson(parsed);
+}
+void Simulator::snapshot(){Snapshot s;s.regs=regs_;s.memory=memory_;s.initialRegs=initialRegs_;s.initialMemory=initialMemory_;s.pc=pc_;s.nextId=nextId_;s.ifid=ifid_;s.idex=idex_;s.exmem1=exmem1_;s.mem1mem2=mem1mem2_;s.mem2wb=mem2wb_;s.stats=stats_;s.predictor=predictor_;s.cache=cache_;s.halted=halted_;s.fetchStopped=fetchStopped_;s.faulted=faulted_;s.referenceComparable=referenceComparable_;s.status=status_;s.memWait=memWait_;s.memAccessStarted=memAccessStarted_;s.timelineSize=timeline_.size();history_.push_back(std::move(s));if(history_.size()>500)history_.pop_front();}
+bool Simulator::restorePreviousCycle(){if(history_.empty())return false;auto s=std::move(history_.back());history_.pop_back();regs_=s.regs;memory_=std::move(s.memory);initialRegs_=s.initialRegs;initialMemory_=std::move(s.initialMemory);pc_=s.pc;nextId_=s.nextId;ifid_=s.ifid;idex_=s.idex;exmem1_=s.exmem1;mem1mem2_=s.mem1mem2;mem2wb_=s.mem2wb;stats_=s.stats;predictor_=s.predictor;cache_=s.cache;halted_=s.halted;fetchStopped_=s.fetchStopped;faulted_=s.faulted;referenceComparable_=s.referenceComparable;status_=s.status;memWait_=s.memWait;memAccessStarted_=s.memAccessStarted;if(s.droppedTimelineFrame){if(!timeline_.empty())timeline_.pop_back();timeline_.push_front(std::move(s.droppedFrame));}else timeline_.resize(s.timelineSize);events_.clear();events_.push_back({"undo",stats_.cycles,"",{},-1,"","Restored the previous deterministic cycle snapshot."});return true;}
 void Simulator::fault(const std::string&m,const std::string&stage,uint64_t id){faulted_=true;fetchStopped_=true;status_="fault";events_.push_back({"fault",stats_.cycles,stage,{id},-1,"",m});}
 uint32_t Simulator::loadWord(uint32_t a){if((a&3)!=0){fault("Unaligned 32-bit load at address 0x"+static_cast<std::ostringstream&&>(std::ostringstream()<<std::hex<<a).str(),"MEM2",mem1mem2_.id);return 0;}if(uint64_t(a)+4>memory_.size()){fault("Out-of-bounds load at address "+std::to_string(a),"MEM2",mem1mem2_.id);return 0;}return cfg_.cacheEnabled?cache_.readWord(a):readLE(memory_,a);}
 void Simulator::storeWord(uint32_t a,uint32_t v){if((a&3)!=0){fault("Unaligned 32-bit store at address "+std::to_string(a),"MEM2",mem1mem2_.id);return;}if(uint64_t(a)+4>memory_.size()){fault("Out-of-bounds store at address "+std::to_string(a),"MEM2",mem1mem2_.id);return;}if(cfg_.cacheEnabled)cache_.writeWord(a,v);else writeLE(memory_,a,v);++stats_.memoryWrites;events_.push_back({"memory-write",stats_.cycles,"MEM2",{mem1mem2_.id},-1,"", "Stored 0x"+static_cast<std::ostringstream&&>(std::ostringstream()<<std::hex<<v).str()+" at address 0x"+static_cast<std::ostringstream&&>(std::ostringstream()<<std::hex<<a).str()+"."});}
@@ -281,7 +452,7 @@ PipelineSlot Simulator::execute(const PipelineSlot&in,bool&redirect,uint32_t&tar
 
 std::string Simulator::stepCycle(){
   if(halted_||faulted_)return getState(); if(stats_.cycles>=cfg_.cycleLimit){fault("Cycle limit reached; execution stopped to prevent an infinite run.","",0);return getState();}
-  snapshot();events_.clear();++stats_.cycles;status_="running";
+  if(!skipSnapshots_)snapshot();events_.clear();++stats_.cycles;status_="running";
   PipelineSlot n_ifid{},n_idex{},n_exmem1{},n_mem1mem2{},n_mem2wb{},flushedIf{},flushedId{};
 
   if(mem2wb_.valid){if(mem2wb_.regWrite&&mem2wb_.decoded.rd!=0){regs_[mem2wb_.decoded.rd]=mem2wb_.writeValue;++stats_.registerWrites;events_.push_back({"register-write",stats_.cycles,"WB",{mem2wb_.id},mem2wb_.decoded.rd,"","Wrote r"+std::to_string(mem2wb_.decoded.rd)+" = "+std::to_string(int32_t(mem2wb_.writeValue))+"."});}regs_[0]=0;++stats_.retired;if(mem2wb_.decoded.op==Op::HALT){halted_=true;status_="halted";events_.push_back({"halt",stats_.cycles,"WB",{mem2wb_.id},-1,"","HALT retired after all older instructions completed."});}}
@@ -289,10 +460,18 @@ std::string Simulator::stepCycle(){
 
   bool memoryStall=false;
   if(exmem1_.valid&&(exmem1_.memRead||exmem1_.memWrite)&&cfg_.cacheEnabled){
-    if(!memAccessStarted_){uint32_t lat=cache_.beginAccess(exmem1_.memoryAddress,exmem1_.memWrite,memory_);memAccessStarted_=true;memWait_=lat>0?lat-1:0;if(lat>cfg_.cacheHitLatency)events_.push_back({"cache-miss",stats_.cycles,"MEM1",{exmem1_.id},-1,"","Data-cache miss for instruction #"+std::to_string(exmem1_.id)+"; MEM1 will wait "+std::to_string(memWait_)+" extra cycle(s)."});}
+    const auto a=exmem1_.memoryAddress;
+    if(!memAccessStarted_&&((a&3)!=0||uint64_t(a)+4>memory_.size())){fault(std::string((a&3)?"Unaligned 32-bit ":"Out-of-bounds ")+(exmem1_.memWrite?"store":"load")+" at address "+std::to_string(a),"MEM1",exmem1_.id);}
+    else if(!memAccessStarted_){uint32_t lat=cache_.beginAccess(a,exmem1_.memWrite,memory_);memAccessStarted_=true;memWait_=lat>0?lat-1:0;if(lat>cfg_.cacheHitLatency)events_.push_back({"cache-miss",stats_.cycles,"MEM1",{exmem1_.id},-1,"","Data-cache miss for instruction #"+std::to_string(exmem1_.id)+"; MEM1 will wait "+std::to_string(memWait_)+" extra cycle(s)."});}
     if(memWait_>0){--memWait_;memoryStall=true;++stats_.stallCycles;++stats_.memoryStallCycles;events_.push_back({"stall",stats_.cycles,"MEM1",{exmem1_.id},-1,"cache","Pipeline stalled while the data cache services instruction #"+std::to_string(exmem1_.id)+"."});}
   }
-  if(memoryStall){n_mem1mem2={};n_exmem1=exmem1_;n_exmem1.stalled=true;n_idex=idex_;n_idex.stalled=true;n_ifid=ifid_;n_ifid.stalled=true;}
+  if(memoryStall){n_mem1mem2={};n_exmem1=exmem1_;n_exmem1.stalled=true;n_idex=idex_;n_idex.stalled=true;n_ifid=ifid_;n_ifid.stalled=true;
+    // A younger instruction may have entered ID/EX expecting an older value to
+    // be forwarded on the next cycle. A long cache stall can let that producer
+    // retire before EX finally runs, so refresh the held register operands from
+    // the now-current architectural register file on every stalled cycle.
+    if(n_idex.valid){if(n_idex.decoded.usesRs1)n_idex.rs1Value=regs_[n_idex.decoded.rs1];if(n_idex.decoded.usesRs2)n_idex.rs2Value=regs_[n_idex.decoded.rs2];}
+  }
   else {
     n_mem1mem2=exmem1_;memAccessStarted_=false;memWait_=0;
     bool redirect=false;uint32_t target=0;n_exmem1=execute(idex_,redirect,target);
@@ -311,42 +490,70 @@ std::string Simulator::stepCycle(){
   TimelineFrame f;f.cycle=stats_.cycles;f.slots={PipelineSlot{},ifid_,idex_,exmem1_,mem1mem2_,mem2wb_};
   if(!fetchStopped_&&pc_/4<program_.words.size()){f.slots[0].valid=true;f.slots[0].pc=pc_;f.slots[0].assembly=program_.assembly[pc_/4];f.slots[0].sourceLine=program_.sourceLines[pc_/4];f.slots[0].decoded=decode(program_.words[pc_/4]);}
   if(flushedIf.valid)f.slots[0]=flushedIf;if(flushedId.valid)f.slots[1]=flushedId;
-  f.events=events_;timeline_.push_back(std::move(f));
+  f.events=events_;timeline_.push_back(std::move(f));if(timeline_.size()>1000){if(skipSnapshots_)timeline_.pop_front();else{history_.back().droppedTimelineFrame=true;history_.back().droppedFrame=std::move(timeline_.front());timeline_.pop_front();}}
   if(fetchStopped_&&pipelineEmpty()&&!halted_&&!faulted_){halted_=true;status_="completed";}
-  return getState();
+  return batchRunning_?std::string{}:getState();
 }
 
 std::string Simulator::stepInstruction(){uint64_t before=stats_.retired;do{stepCycle();}while(!halted_&&!faulted_&&stats_.retired==before);return getState();}
-std::string Simulator::runCycles(uint32_t n){for(uint32_t i=0;i<n&&!halted_&&!faulted_;++i){if(breakpoints_.count(pc_)){status_="breakpoint";break;}stepCycle();}return getState();}
-std::string Simulator::runUntilCompletion(uint32_t n){return runCycles(n);}
-std::string Simulator::runUntilBreakpoint(uint32_t n){for(uint32_t i=0;i<n&&!halted_&&!faulted_;++i){if(breakpoints_.count(pc_)){status_="breakpoint";break;}stepCycle();}return getState();}
+std::string Simulator::runCycles(uint32_t n){batchRunning_=true;for(uint32_t i=0;i<n&&!halted_&&!faulted_;++i){if(breakpoints_.count(pc_)){status_="breakpoint";break;}stepCycle();}batchRunning_=false;return getState();}
+std::string Simulator::runUntilCompletion(uint32_t n){history_.clear();skipSnapshots_=true;runCycles(n);skipSnapshots_=false;if(!halted_&&!faulted_&&stats_.cycles>=cfg_.cycleLimit)fault("Cycle limit reached; execution stopped to prevent an infinite run.","",0);return getState();}
+std::string Simulator::runUntilBreakpoint(uint32_t n){history_.clear();skipSnapshots_=true;auto result=runCycles(n);skipSnapshots_=false;return result;}
 void Simulator::setBreakpoint(uint32_t a,bool on){if(on)breakpoints_.insert(a);else breakpoints_.erase(a);}
-void Simulator::setRegister(uint32_t i,uint32_t v){if(i>0&&i<32)regs_[i]=v;regs_[0]=0;}
-std::string Simulator::readMemory(uint32_t a,uint32_t len)const{std::ostringstream o;o<<'[';for(uint32_t i=0;i<len&&uint64_t(a)+i<memory_.size();++i){if(i)o<<',';o<<unsigned(memory_[a+i]);}o<<']';return o.str();}
-bool Simulator::writeMemory(uint32_t a,const std::string& csv){std::istringstream in(csv);std::string x;std::vector<uint8_t> bytes;while(std::getline(in,x,',')){int64_t v=0;if(!parseInteger(trim(x),v)||v<0||v>255)return false;bytes.push_back(uint8_t(v));}if(bytes.empty()||uint64_t(a)+bytes.size()>memory_.size())return false;for(size_t i=0;i<bytes.size();++i){memory_[a+i]=bytes[i];if(cfg_.cacheEnabled)cache_.patchByte(a+uint32_t(i),bytes[i]);}events_.push_back({"memory-edit",stats_.cycles,"",{},-1,"ui","Edited "+std::to_string(bytes.size())+" byte(s) at address "+std::to_string(a)+"."});return true;}
+void Simulator::setRegister(uint32_t i,uint32_t v){if(i>0&&i<32){regs_[i]=v;if(stats_.cycles==0)initialRegs_[i]=v;else referenceComparable_=false;}regs_[0]=0;initialRegs_[0]=0;}
+std::string Simulator::readMemory(uint32_t a,uint32_t len)const{std::ostringstream o;o<<'[';for(uint32_t i=0;i<len&&uint64_t(a)+i<memory_.size();++i){if(i)o<<',';o<<unsigned(cfg_.cacheEnabled?cache_.inspectByte(a+i,memory_):memory_[a+i]);}o<<']';return o.str();}
+bool Simulator::writeMemory(uint32_t a,const std::string& csv){std::istringstream in(csv);std::string x;std::vector<uint8_t> bytes;while(std::getline(in,x,',')){int64_t v=0;if(!parseInteger(trim(x),v)||v<0||v>255)return false;bytes.push_back(uint8_t(v));}if(bytes.empty()||uint64_t(a)+bytes.size()>memory_.size())return false;for(size_t i=0;i<bytes.size();++i){memory_[a+i]=bytes[i];if(cfg_.cacheEnabled)cache_.patchByte(a+uint32_t(i),bytes[i]);if(stats_.cycles==0)initialMemory_[a+i]=bytes[i];}if(stats_.cycles>0)referenceComparable_=false;events_.push_back({"memory-edit",stats_.cycles,"",{},-1,"ui","Edited "+std::to_string(bytes.size())+" byte(s) at address "+std::to_string(a)+"."});return true;}
+std::vector<uint8_t> Simulator::coherentMemory()const{auto result=memory_;if(cfg_.cacheEnabled)cache_.overlayMemory(result);return result;}
+std::string Simulator::getInitialState()const{std::ostringstream o;o<<"{\"registers\":[";for(size_t i=0;i<initialRegs_.size();++i){if(i)o<<',';o<<initialRegs_[i];}o<<"],\"memory\":[";for(size_t i=0;i<initialMemory_.size();++i){if(i)o<<',';o<<unsigned(initialMemory_[i]);}o<<"]}";return o.str();}
 
-std::string Simulator::slotJson(const PipelineSlot&s,const std::string&stage)const{std::ostringstream o;o<<"{\"stage\":\""<<stage<<"\",\"valid\":"<<(s.valid?"true":"false")<<",\"stalled\":"<<(s.stalled?"true":"false")<<",\"bubble\":"<<(s.bubble?"true":"false")<<",\"squashed\":"<<(s.squashed?"true":"false")<<",\"id\":"<<s.id<<",\"pc\":"<<s.pc<<",\"raw\":"<<s.raw<<",\"op\":\""<<opName(s.decoded.op)<<"\",\"assembly\":\""<<jsonEscape(s.assembly)<<"\",\"sourceLine\":"<<s.sourceLine<<",\"rs1\":"<<unsigned(s.decoded.rs1)<<",\"rs2\":"<<unsigned(s.decoded.rs2)<<",\"rd\":"<<unsigned(s.decoded.rd)<<",\"usesRs1\":"<<(s.decoded.usesRs1?"true":"false")<<",\"usesRs2\":"<<(s.decoded.usesRs2?"true":"false")<<",\"writesRd\":"<<(s.decoded.writesRd?"true":"false")<<",\"isLoad\":"<<(s.decoded.isLoad?"true":"false")<<",\"isStore\":"<<(s.decoded.isStore?"true":"false")<<",\"immediate\":"<<s.decoded.imm<<",\"rs1Value\":"<<s.rs1Value<<",\"rs2Value\":"<<s.rs2Value<<",\"operandA\":"<<s.operandA<<",\"operandB\":"<<s.operandB<<",\"aluResult\":"<<s.aluResult<<",\"memoryAddress\":"<<s.memoryAddress<<",\"memoryData\":"<<s.memoryData<<",\"writeValue\":"<<s.writeValue<<",\"regWrite\":"<<(s.regWrite?"true":"false")<<",\"memRead\":"<<(s.memRead?"true":"false")<<",\"memWrite\":"<<(s.memWrite?"true":"false")<<",\"predictedTaken\":"<<(s.predictedTaken?"true":"false")<<",\"actualTaken\":"<<(s.actualTaken?"true":"false")<<",\"mispredicted\":"<<(s.mispredicted?"true":"false")<<'}';return o.str();}
+std::string Simulator::slotJson(const PipelineSlot&s,const std::string&stage)const{std::ostringstream o;o<<"{\"stage\":\""<<stage<<"\",\"valid\":"<<(s.valid?"true":"false")<<",\"stalled\":"<<(s.stalled?"true":"false")<<",\"bubble\":"<<(s.bubble?"true":"false")<<",\"squashed\":"<<(s.squashed?"true":"false")<<",\"id\":"<<s.id<<",\"pc\":"<<s.pc<<",\"raw\":"<<s.raw<<",\"op\":\""<<opName(s.decoded.op)<<"\",\"assembly\":\""<<jsonEscape(s.assembly)<<"\",\"sourceLine\":"<<s.sourceLine<<",\"rs1\":"<<unsigned(s.decoded.rs1)<<",\"rs2\":"<<unsigned(s.decoded.rs2)<<",\"rd\":"<<unsigned(s.decoded.rd)<<",\"usesRs1\":"<<(s.decoded.usesRs1?"true":"false")<<",\"usesRs2\":"<<(s.decoded.usesRs2?"true":"false")<<",\"writesRd\":"<<(s.decoded.writesRd?"true":"false")<<",\"isLoad\":"<<(s.decoded.isLoad?"true":"false")<<",\"isStore\":"<<(s.decoded.isStore?"true":"false")<<",\"immediate\":"<<s.decoded.imm<<",\"rs1Value\":"<<s.rs1Value<<",\"rs2Value\":"<<s.rs2Value<<",\"operandA\":"<<s.operandA<<",\"operandB\":"<<s.operandB<<",\"aluResult\":"<<s.aluResult<<",\"memoryAddress\":"<<s.memoryAddress<<",\"memoryData\":"<<s.memoryData<<",\"writeValue\":"<<s.writeValue<<",\"regWrite\":"<<(s.regWrite?"true":"false")<<",\"memRead\":"<<(s.memRead?"true":"false")<<",\"memWrite\":"<<(s.memWrite?"true":"false")<<",\"predictedTaken\":"<<(s.predictedTaken?"true":"false")<<",\"predictedTarget\":"<<s.predictedTarget<<",\"actualTaken\":"<<(s.actualTaken?"true":"false")<<",\"actualTarget\":"<<s.actualTarget<<",\"mispredicted\":"<<(s.mispredicted?"true":"false")<<'}';return o.str();}
 std::string Simulator::getEvents()const{std::ostringstream o;o<<'[';for(size_t i=0;i<events_.size();++i){if(i)o<<',';auto&e=events_[i];o<<"{\"type\":\""<<e.type<<"\",\"cycle\":"<<e.cycle<<",\"stage\":\""<<e.stage<<"\",\"instructionIds\":[";for(size_t k=0;k<e.instructionIds.size();++k){if(k)o<<',';o<<e.instructionIds[k];}o<<"],\"reg\":"<<e.reg<<",\"source\":\""<<e.source<<"\",\"message\":\""<<jsonEscape(e.message)<<"\"}";}o<<']';return o.str();}
 std::string Simulator::getTimeline()const{std::ostringstream o;o<<'[';for(size_t i=0;i<timeline_.size();++i){if(i)o<<',';o<<"{\"cycle\":"<<timeline_[i].cycle<<",\"stages\":[";static const char* names[]={"IF","ID","EX","MEM1","MEM2","WB"};for(int k=0;k<6;++k){if(k)o<<',';o<<slotJson(timeline_[i].slots[k],names[k]);}o<<"]}";}o<<']';return o.str();}
 std::string Simulator::compareReference()const{
   std::ostringstream o;
-  if(!halted_&&!faulted_){return "{\"comparable\":false,\"matches\":false,\"referenceHalted\":false,\"error\":\"\",\"differences\":[],\"message\":\"Run the program to completion before comparing it with the reference interpreter.\"}";}
-  auto ref=ReferenceInterpreter{}.run(program_,cfg_,cfg_.cycleLimit);
+  if(!halted_&&!faulted_){return "{\"comparable\":false,\"matches\":false,\"referenceHalted\":false,\"error\":\"\",\"differences\":[],\"memoryDifferences\":[],\"message\":\"Run the program to completion before comparing it with the reference interpreter.\"}";}
+  if(!referenceComparable_){return "{\"comparable\":false,\"matches\":false,\"referenceHalted\":false,\"error\":\"Architectural state was edited after execution began.\",\"differences\":[],\"memoryDifferences\":[],\"message\":\"Reference comparison is unavailable after a mid-run register or memory edit; reset and apply edits before the first cycle.\"}";}
+  auto ref=ReferenceInterpreter{}.runWithInitialState(program_,cfg_,cfg_.cycleLimit,initialRegs_,initialMemory_);
   std::vector<size_t> differences;for(size_t i=1;i<regs_.size();++i)if(regs_[i]!=ref.registers[i])differences.push_back(i);
-  bool matches=ref.error.empty()&&ref.halted&&differences.empty()&&!faulted_;
+  const auto actualMemory=coherentMemory();std::vector<size_t> memoryDifferences;for(size_t i=0;i<std::min(actualMemory.size(),ref.memory.size());++i)if(actualMemory[i]!=ref.memory[i])memoryDifferences.push_back(i);
+  bool matches=ref.error.empty()&&ref.halted&&differences.empty()&&memoryDifferences.empty()&&!faulted_;
   o<<"{\"comparable\":true,\"matches\":"<<(matches?"true":"false")<<",\"referenceHalted\":"<<(ref.halted?"true":"false")<<",\"error\":\""<<jsonEscape(ref.error)<<"\",\"differences\":[";
   for(size_t i=0;i<differences.size();++i){if(i)o<<',';auto r=differences[i];o<<"{\"register\":"<<r<<",\"actual\":"<<regs_[r]<<",\"expected\":"<<ref.registers[r]<<'}';}
-  o<<"],\"message\":\"";
+  o<<"],\"memoryDifferences\":[";for(size_t i=0;i<std::min<size_t>(memoryDifferences.size(),32);++i){if(i)o<<',';auto a=memoryDifferences[i];o<<"{\"address\":"<<a<<",\"actual\":"<<unsigned(actualMemory[a])<<",\"expected\":"<<unsigned(ref.memory[a])<<'}';}o<<"],\"message\":\"";
   if(matches)o<<"Pipeline result matches the non-pipelined reference interpreter.";
   else if(faulted_)o<<"The pipeline faulted before architectural completion.";
   else if(!ref.error.empty())o<<"Reference execution failed: "<<jsonEscape(ref.error)<<'.';
-  else o<<differences.size()<<" register value"<<(differences.size()==1?" differs":"s differ")<<" from the reference result. Check manual scheduling and dependency hazards.";
+  else o<<differences.size()<<" register value(s) and "<<memoryDifferences.size()<<" memory byte(s) differ from the reference result. Check manual scheduling and dependency hazards.";
   o<<"\"}";return o.str();
 }
-std::string Simulator::getState()const{std::ostringstream o;o<<"{\"status\":\""<<status_<<"\",\"halted\":"<<(halted_?"true":"false")<<",\"faulted\":"<<(faulted_?"true":"false")<<",\"pc\":"<<pc_<<",\"configuration\":{\"forwarding\":\""<<forwardingName(cfg_.forwarding)<<"\",\"predictor\":\""<<predictorName(cfg_.predictor)<<"\",\"cacheEnabled\":"<<(cfg_.cacheEnabled?"true":"false")<<"},\"registers\":[";for(size_t i=0;i<32;++i){if(i)o<<',';o<<regs_[i];}o<<"],\"pipeline\":["<<slotJson(ifid_,"ID")<<','<<slotJson(idex_,"EX")<<','<<slotJson(exmem1_,"MEM1")<<','<<slotJson(mem1mem2_,"MEM2")<<','<<slotJson(mem2wb_,"WB")<<"],\"statistics\":{";
+std::string Simulator::getState()const{std::ostringstream o;o<<"{\"status\":\""<<status_<<"\",\"halted\":"<<(halted_?"true":"false")<<",\"faulted\":"<<(faulted_?"true":"false")<<",\"pc\":"<<pc_<<",\"configuration\":"<<configurationJson(cfg_)<<",\"registers\":[";for(size_t i=0;i<32;++i){if(i)o<<',';o<<regs_[i];}o<<"],\"pipeline\":["<<slotJson(ifid_,"ID")<<','<<slotJson(idex_,"EX")<<','<<slotJson(exmem1_,"MEM1")<<','<<slotJson(mem1mem2_,"MEM2")<<','<<slotJson(mem2wb_,"WB")<<"],\"statistics\":{";
   o<<"\"cycles\":"<<stats_.cycles<<",\"fetched\":"<<stats_.fetched<<",\"retired\":"<<stats_.retired<<",\"cpi\":"<<(stats_.retired?double(stats_.cycles)/stats_.retired:0)<<",\"ipc\":"<<(stats_.cycles?double(stats_.retired)/stats_.cycles:0)<<",\"stallCycles\":"<<stats_.stallCycles<<",\"dataStallCycles\":"<<stats_.dataStallCycles<<",\"memoryStallCycles\":"<<stats_.memoryStallCycles<<",\"controlPenalty\":"<<stats_.controlPenalty<<",\"forwardingEvents\":"<<stats_.forwardingEvents<<",\"flushedInstructions\":"<<stats_.flushedInstructions<<",\"branches\":"<<stats_.branches<<",\"correctPredictions\":"<<stats_.correctPredictions<<",\"mispredictions\":"<<stats_.mispredictions<<",\"registerWrites\":"<<stats_.registerWrites<<",\"memoryWrites\":"<<stats_.memoryWrites<<"},\"events\":"<<getEvents()<<",\"predictorTable\":[";
-  const auto&pt=predictor_.entries();for(size_t i=0;i<pt.size();++i){if(i)o<<',';o<<"{\"index\":"<<i<<",\"valid\":"<<(pt[i].valid?"true":"false")<<",\"pc\":"<<pt[i].tagPc<<",\"state\":"<<unsigned(pt[i].state)<<",\"prediction\":"<<(pt[i].valid&&predictor_.predict(pt[i].tagPc)?"true":"false")<<",\"recentTaken\":"<<(pt[i].recentTaken?"true":"false")<<'}';}o<<"],\"cache\":{\"reads\":"<<cache_.stats().reads<<",\"writes\":"<<cache_.stats().writes<<",\"hits\":"<<cache_.stats().hits<<",\"misses\":"<<cache_.stats().misses<<",\"dirtyWritebacks\":"<<cache_.stats().dirtyWritebacks<<",\"sets\":[";auto&sets=cache_.sets();for(size_t s=0;s<sets.size();++s){if(s)o<<',';o<<'[';for(size_t w=0;w<sets[s].size();++w){if(w)o<<',';auto&l=sets[s][w];o<<"{\"valid\":"<<(l.valid?"true":"false")<<",\"dirty\":"<<(l.dirty?"true":"false")<<",\"tag\":"<<l.tag<<",\"lru\":"<<l.lru<<",\"preview\":\"";for(size_t b=0;b<std::min<size_t>(8,l.data.size());++b)o<<std::hex<<std::setw(2)<<std::setfill('0')<<unsigned(l.data[b]);o<<std::dec<<"\"}";}o<<']';}o<<"]},\"breakpoints\":[";size_t bi=0;for(auto b:breakpoints_){if(bi++)o<<',';o<<b;}o<<"]}";return o.str();}
+  const auto&pt=predictor_.entries();for(size_t i=0;i<pt.size();++i){if(i)o<<',';o<<"{\"index\":"<<i<<",\"valid\":"<<(pt[i].valid?"true":"false")<<",\"pc\":"<<pt[i].tagPc<<",\"state\":"<<unsigned(pt[i].state)<<",\"prediction\":"<<(pt[i].valid&&predictor_.predict(pt[i].tagPc)?"true":"false")<<",\"recentTaken\":"<<(pt[i].recentTaken?"true":"false")<<'}';}
+  auto&sets=cache_.sets();const size_t ways=sets.empty()?1:std::max<size_t>(1,sets[0].size()),visibleCount=std::min(sets.size(),std::max<size_t>(1,512/ways));
+  o<<"],\"cache\":{\"reads\":"<<cache_.stats().reads<<",\"writes\":"<<cache_.stats().writes<<",\"hits\":"<<cache_.stats().hits<<",\"misses\":"<<cache_.stats().misses<<",\"dirtyWritebacks\":"<<cache_.stats().dirtyWritebacks<<",\"stallCycles\":"<<cache_.stats().stallCycles<<",\"totalSets\":"<<sets.size()<<",\"visibleSetIndices\":[";for(size_t s=0;s<visibleCount;++s){if(s)o<<',';o<<s;}o<<"],\"sets\":[";for(size_t s=0;s<visibleCount;++s){if(s)o<<',';o<<'[';for(size_t w=0;w<sets[s].size();++w){if(w)o<<',';auto&l=sets[s][w];o<<"{\"valid\":"<<(l.valid?"true":"false")<<",\"dirty\":"<<(l.dirty?"true":"false")<<",\"tag\":"<<l.tag<<",\"lru\":"<<l.lru<<",\"preview\":\"";for(size_t b=0;b<std::min<size_t>(8,l.data.size());++b)o<<std::hex<<std::setw(2)<<std::setfill('0')<<unsigned(l.data[b]);o<<std::dec<<"\"}";}o<<']';}o<<"]},\"breakpoints\":[";size_t bi=0;for(auto b:breakpoints_){if(bi++)o<<',';o<<b;}o<<"]}";return o.str();}
 
 ReferenceResult ReferenceInterpreter::run(const Program&p,const Configuration&cfg,uint64_t max)const{ReferenceResult r;r.memory.assign(std::max(1024u,cfg.memoryBytes),0);r.registers.fill(0);r.registers[29]=std::min<uint32_t>(cfg.initialStackPointer,uint32_t(r.memory.size()-4));for(size_t i=0;i<p.words.size();++i)writeLE(r.memory,uint32_t(i*4),p.words[i]);while(r.steps++<max){if(r.pc&3||r.pc/4>=p.words.size()){r.error="Invalid PC";break;}auto d=decode(p.words[r.pc/4]);uint32_t next=r.pc+4,a=r.registers[d.rs1],b=r.registers[d.rs2],v=0;switch(d.op){case Op::NOP:break;case Op::ADD:v=a+b;break;case Op::SUB:v=a-b;break;case Op::MUL:v=a*b;break;case Op::ADDI:v=a+uint32_t(d.imm);break;case Op::AND:v=a&b;break;case Op::OR:v=a|b;break;case Op::XOR:v=a^b;break;case Op::SLL:v=a<<(b&31);break;case Op::SRL:v=a>>(b&31);break;case Op::SLT:v=int32_t(a)<int32_t(b);break;case Op::LUI:v=uint32_t(d.imm);break;case Op::LW:{uint32_t x=a+uint32_t(d.imm);if((x&3)||uint64_t(x)+4>r.memory.size()){r.error="Invalid load";return r;}v=readLE(r.memory,x);break;}case Op::SW:{uint32_t x=a+uint32_t(d.imm);if((x&3)||uint64_t(x)+4>r.memory.size()){r.error="Invalid store";return r;}writeLE(r.memory,x,b);break;}case Op::BEQ:if(a==b)next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::BNE:if(a!=b)next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::BLT:if(int32_t(a)<int32_t(b))next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::J:next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::JAL:v=r.pc+4;next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::JR:next=a;break;case Op::HALT:r.halted=true;r.pc=next;return r;default:r.error="Invalid opcode";return r;}if(d.writesRd&&d.rd)r.registers[d.rd]=v;r.registers[0]=0;r.pc=next;}if(!r.halted&&r.error.empty())r.error="Step limit reached";return r;}
+
+ReferenceResult ReferenceInterpreter::runWithInitialState(const Program& p,const Configuration& cfg,uint64_t max,const std::array<uint32_t,32>& initialRegisters,const std::vector<uint8_t>& initialMemory)const{
+  ReferenceResult r;r.memory=initialMemory;r.registers=initialRegisters;r.registers[0]=0;
+  if(r.memory.size()!=std::max(1024u,cfg.memoryBytes)){r.error="Initial memory size does not match the processor configuration";return r;}
+  while(r.steps++<max){
+    if(r.pc&3||r.pc/4>=p.words.size()){r.error="Invalid PC";break;}
+    auto d=decode(p.words[r.pc/4]);uint32_t next=r.pc+4,a=r.registers[d.rs1],b=r.registers[d.rs2],v=0;
+    switch(d.op){
+      case Op::NOP:break;case Op::ADD:v=a+b;break;case Op::SUB:v=a-b;break;case Op::MUL:v=a*b;break;case Op::ADDI:v=a+uint32_t(d.imm);break;
+      case Op::AND:v=a&b;break;case Op::OR:v=a|b;break;case Op::XOR:v=a^b;break;case Op::SLL:v=a<<(b&31);break;case Op::SRL:v=a>>(b&31);break;
+      case Op::SLT:v=int32_t(a)<int32_t(b);break;case Op::LUI:v=uint32_t(d.imm);break;
+      case Op::LW:{uint32_t x=a+uint32_t(d.imm);if((x&3)||uint64_t(x)+4>r.memory.size()){r.error="Invalid load";return r;}v=readLE(r.memory,x);break;}
+      case Op::SW:{uint32_t x=a+uint32_t(d.imm);if((x&3)||uint64_t(x)+4>r.memory.size()){r.error="Invalid store";return r;}writeLE(r.memory,x,b);break;}
+      case Op::BEQ:if(a==b)next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::BNE:if(a!=b)next=uint32_t(int64_t(r.pc)+4+d.imm);break;
+      case Op::BLT:if(int32_t(a)<int32_t(b))next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::J:next=uint32_t(int64_t(r.pc)+4+d.imm);break;
+      case Op::JAL:v=r.pc+4;next=uint32_t(int64_t(r.pc)+4+d.imm);break;case Op::JR:next=a;break;
+      case Op::HALT:r.halted=true;r.pc=next;return r;default:r.error="Invalid opcode";return r;
+    }
+    if(d.writesRd&&d.rd)r.registers[d.rd]=v;r.registers[0]=0;r.pc=next;
+  }
+  if(!r.halted&&r.error.empty())r.error="Step limit reached";return r;
+}
 
 }  // namespace cpulab

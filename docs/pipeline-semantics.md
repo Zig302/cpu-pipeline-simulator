@@ -23,7 +23,7 @@ With forwarding disabled, ID waits while a matching producer occupies ID/EX, EX/
 
 ## Bubbles, stalls, and flushing
 
-A data stall freezes PC and IF/ID and inserts an invalid bubble into ID/EX. A cache wait freezes PC, IF/ID, ID/EX, and EX/MEM1 while older stages drain. A wrong branch direction or target, detected in EX, redirects PC and squashes the younger ID and IF instructions. Squashed instructions never advance or produce a side effect.
+A data stall freezes PC and IF/ID and inserts an invalid bubble into ID/EX. A cache wait freezes PC, IF/ID, ID/EX, and EX/MEM1 while older stages drain. If an older producer retires during that extended wait, operands held in ID/EX are refreshed from the now-current register file; this preserves the value that would otherwise have arrived through next-cycle forwarding. A wrong branch direction or target, detected in EX, redirects PC and squashes the younger ID and IF instructions. Squashed instructions never advance or produce a side effect.
 
 ## Control prediction
 
@@ -35,7 +35,8 @@ Without the cache, every memory instruction uses MEM1 and MEM2 and never adds a 
 
 The optional cache is write-back and write-allocate. An access selects a set by block number, matches tags across ways, and uses the smallest LRU counter as victim. A dirty victim writes its block to backing memory before fill. `hitLatency - 1` or `hitLatency + missPenalty - 1` extra cycles are reflected as memory stalls.
 
+The UI and JSON API accept only validated geometry: power-of-two capacity, block size, and associativity; at least one whole set; block sizes large enough for an aligned word; and bounded positive hit/miss timing. Exact ranges and presets are documented in [configuration.md](configuration.md).
+
 ## HALT and counters
 
 HALT stops fetch when it reaches ID. It continues through all remaining stages and sets `halted` when it retires from WB; all older operations have then completed. HALT and explicit NOP retire. Bubbles and squashed instructions do not. Fetched includes wrong-path fetches. The cycle cap converts a runaway program into a deterministic fault.
-

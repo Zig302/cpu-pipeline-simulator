@@ -1,4 +1,5 @@
 import type { CpuState, ReferenceComparison } from "./types";
+import type { ProcessorConfiguration } from "./configuration";
 
 export interface LessonCheckpoint {
   title: string;
@@ -11,7 +12,7 @@ export interface Lesson {
   title: string;
   summary: string;
   exampleId: string;
-  configuration?: { forwarding?: string; predictor?: string; cacheEnabled?: boolean };
+  configuration?: Partial<ProcessorConfiguration>;
   checkpoints: LessonCheckpoint[];
 }
 

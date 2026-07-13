@@ -28,7 +28,7 @@ for (const stream of [server.stdout, server.stderr]) stream.on("data", (chunk) =
 const base = `http://localhost:${port}`;
 const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 async function waitForServer() {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (server.exitCode !== null) throw new Error(`Server exited early (${server.exitCode}).\n${output.join("")}`);
     try { const response = await fetch(base); if (response.ok) return response; } catch {}

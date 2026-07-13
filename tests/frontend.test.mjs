@@ -65,6 +65,7 @@ test("server QA tears down the full Windows worker process tree", async () => {
   const runner = await readFile(new URL("scripts/qa-server.mjs", root), "utf8");
   assert.match(runner, /process\.platform === "win32"/);
   assert.match(runner, /spawn\("taskkill", \["\/pid", String\(server\.pid\), "\/t", "\/f"\]/);
+  assert.match(runner, /Date\.now\(\) \+ 60_000/);
   assert.match(runner, /finally \{\s*await stopServer\(\);\s*\}/);
   assert.match(runner, /mkdtemp\(join\(tmpdir\(\), "cpulab-wasm-qa-"\)\)/);
   assert.doesNotMatch(runner, /out[\\/]wasm/);
@@ -116,7 +117,7 @@ test("project persistence and trace export are versioned and validated", async (
     readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
     readFile(new URL("package.json", root), "utf8"),
   ]);
-  assert.equal(JSON.parse(pkg).version, "1.2.0");
+  assert.equal(JSON.parse(pkg).version, "1.3.0");
   assert.match(project, /format: "pipeline-lab-project"/);
   assert.match(project, /Unsupported Pipeline Lab project format/);
   assert.match(project, /format: "pipeline-lab-trace"/);
@@ -141,14 +142,14 @@ test("learning center includes guided labs, ISA help, and core-backed performanc
   assert.match(bindings, /compareReference/);
 });
 
-test("v1.2 performance reports cover release configurations and remain exportable", async () => {
+test("performance reports cover release and custom configurations and remain exportable", async () => {
   const [benchmark, center, component, project] = await Promise.all([
     readFile(new URL("frontend/src/benchmark.ts", root), "utf8"),
     readFile(new URL("frontend/src/LearningCenter.tsx", root), "utf8"),
     readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
     readFile(new URL("frontend/src/project.ts", root), "utf8"),
   ]);
-  for (const kind of ["suite", "forwarding", "prediction", "cache"]) assert.match(benchmark, new RegExp(`"${kind}"`));
+  for (const kind of ["suite", "forwarding", "prediction", "cache", "custom"]) assert.match(benchmark, new RegExp(`"${kind}"`));
   for (const scenario of ["baseline", "no-forwarding", "always-not-taken", "cache-enabled"]) assert.match(benchmark, new RegExp(`"${scenario}"`));
   assert.match(benchmark, /format: "pipeline-lab-benchmark"/);
   assert.match(benchmark, /architecturalMatch/);
@@ -159,6 +160,34 @@ test("v1.2 performance reports cover release configurations and remain exportabl
   assert.match(center, /Export JSON/);
   assert.match(center, /Export CSV/);
   assert.match(project, /export function downloadText/);
+});
+
+test("v1.3 microarchitecture settings are core-validated, preset-backed, and persisted", async () => {
+  const [configuration, component, types, bindings, core, project, benchmark] = await Promise.all([
+    readFile(new URL("frontend/src/configuration.ts", root), "utf8"),
+    readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/types.ts", root), "utf8"),
+    readFile(new URL("core/src/bindings.cpp", root), "utf8"),
+    readFile(new URL("core/src/core.cpp", root), "utf8"),
+    readFile(new URL("frontend/src/project.ts", root), "utf8"),
+    readFile(new URL("frontend/src/benchmark.ts", root), "utf8"),
+  ]);
+  for (const field of ["predictorEntries", "cacheCapacity", "cacheBlockSize", "cacheAssociativity", "cacheHitLatency", "cacheMissPenalty"]) {
+    assert.match(configuration, new RegExp(field));
+    assert.match(component, new RegExp(field));
+    assert.match(core, new RegExp(field));
+  }
+  for (const preset of ["balanced", "tiny-direct", "spatial", "branch-pressure", "slow-memory"]) assert.match(configuration, new RegExp(`id: "${preset}"`));
+  assert.match(configuration, /CUSTOM_PRESET_STORAGE_KEY/);
+  assert.match(component, /validateConfigurationJson/);
+  assert.match(component, /applyConfigurationJson/);
+  assert.match(bindings, /validateConfigurationJson/);
+  assert.match(bindings, /applyConfigurationJson/);
+  assert.match(types, /configuration: ProcessorConfiguration/);
+  assert.match(project, /version: 2/);
+  assert.match(project, /\[1, 2\]/);
+  assert.match(benchmark, /kind === "custom"/);
+  assert.match(benchmark, /predictor_entries/);
 });
 
 test("keyboard and accessibility landmarks are present", async () => {
@@ -192,4 +221,27 @@ test("stage explanations follow live cycle state and expose real register reads"
     assert.match(types, new RegExp(`${field}:`));
     assert.match(core, new RegExp(`\\\\\"${field}\\\\\"`));
   }
+});
+
+test("v1.3 QA hardening keeps cache state bounded, benchmarks sequential, and initialized inputs authoritative", async () => {
+  const [component, types, core, center, styles] = await Promise.all([
+    readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/types.ts", root), "utf8"),
+    readFile(new URL("core/src/core.cpp", root), "utf8"),
+    readFile(new URL("frontend/src/LearningCenter.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/lab.css", root), "utf8"),
+  ]);
+  assert.doesNotMatch(component, /Promise\.all\(benchmarkScenarios/);
+  assert.match(component, /for\(const scenario of benchmarkScenarios/);
+  assert.match(component, /getInitialState\(\)/);
+  assert.match(component, /initial\.memory\.slice/);
+  assert.match(component, /Ignored .* invalid saved preset/);
+  assert.match(types, /memoryDifferences: ReferenceMemoryDifference\[\]/);
+  for (const field of ["predictedTarget", "actualTarget", "totalSets", "visibleSetIndices", "stallCycles"]) assert.match(types, new RegExp(field));
+  assert.match(core, /coherentMemory\(\)/);
+  assert.match(core, /visibleCount=std::min/);
+  assert.match(core, /runWithInitialState/);
+  assert.match(center, /benchmark-error/);
+  assert.match(styles, /\.switch input:focus-visible\+i/);
+  assert.match(styles, /\.cache-preview-note/);
 });

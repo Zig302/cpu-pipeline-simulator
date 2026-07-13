@@ -44,15 +44,21 @@ async function openConfiguration(page: Page) {
   await expect(details.locator(".configuration-body")).toBeVisible();
 }
 
-async function applyConfiguration(page: Page, options: { forwarding?: string; predictor?: string; cache?: boolean }) {
+async function applyConfiguration(page: Page, options: { forwarding?: string; predictor?: string; predictorEntries?: number; cache?: boolean; cacheCapacity?: number; cacheBlockSize?: number; cacheAssociativity?: number; cacheHitLatency?: number; cacheMissPenalty?: number }) {
   await openConfiguration(page);
   if (options.forwarding) await page.getByLabel("Hazard handling").selectOption(options.forwarding);
   if (options.predictor) await page.getByLabel("Branch predictor").selectOption(options.predictor);
+  if (options.predictorEntries !== undefined) await page.getByLabel("Predictor entries").fill(String(options.predictorEntries));
   if (options.cache !== undefined) {
     const cache=page.locator(".configuration input[type=checkbox]");
     if ((await cache.isChecked())!==options.cache)await page.locator(".configuration .switch").click();
     await expect(cache).toBeChecked({ checked: options.cache });
   }
+  if (options.cacheCapacity !== undefined) await page.getByLabel("Capacity (bytes)").fill(String(options.cacheCapacity));
+  if (options.cacheBlockSize !== undefined) await page.getByLabel("Block size (bytes)").fill(String(options.cacheBlockSize));
+  if (options.cacheAssociativity !== undefined) await page.getByLabel("Associativity (ways)").fill(String(options.cacheAssociativity));
+  if (options.cacheHitLatency !== undefined) await page.getByLabel("Hit latency").fill(String(options.cacheHitLatency));
+  if (options.cacheMissPenalty !== undefined) await page.getByLabel("Miss penalty").fill(String(options.cacheMissPenalty));
   await page.getByRole("button", { name: "Apply & reset processor" }).click();
   await expect(page.locator(".status-pill")).toContainText("ready");
 }
@@ -197,6 +203,87 @@ test("hazards, forwarding, branch recovery, manual mode, cache, and every inspec
   await expect(errors).toEqual([]);
 });
 
+test("v1.3 microarchitecture controls, validation, presets, legacy projects, and custom benchmarks", async ({ page }) => {
+  const errors = watchRuntimeErrors(page);
+  await boot(page);
+  await openConfiguration(page);
+  await page.getByLabel("Microarchitecture preset").selectOption("tiny-direct");
+  await page.getByRole("button", { name: "Load preset" }).click();
+  await expect(page.getByLabel("Capacity (bytes)")).toHaveValue("64");
+  await expect(page.getByLabel("Block size (bytes)")).toHaveValue("16");
+  await expect(page.getByLabel("Associativity (ways)")).toHaveValue("1");
+
+  await page.getByLabel("Predictor entries").fill("3");
+  await page.getByRole("button", { name: "Apply & reset processor" }).click();
+  await expect(page.getByRole("alert")).toContainText("Predictor entries must be a power of two");
+  await expect(page.locator(".status-pill")).toContainText("ready");
+
+  await page.getByLabel("Predictor entries").fill("8");
+  await page.getByLabel("Capacity (bytes)").fill("128");
+  await page.getByLabel("Associativity (ways)").fill("2");
+  await page.getByLabel("Hit latency").fill("2");
+  await page.getByLabel("Miss penalty").fill("11");
+  await page.getByRole("button", { name: "Apply & reset processor" }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await selectInspector(page, "Predictor");
+  await expect(page.locator(".data-table tbody tr")).toHaveCount(8);
+
+  await loadExample(page, "store-forward");
+  await runToCompletion(page);
+  await selectInspector(page, "Registers");
+  await expect(page.locator(".register-grid button").filter({ has: page.locator("span", { hasText: /^r3$/ }) })).toContainText("42");
+  await expect(page.locator(".correctness-card.matches")).toContainText("Architectural result verified");
+  await selectInspector(page, "Cache");
+  await expect(page.locator(".cache-set")).toHaveCount(4);
+  await expect(await statistic(page, "Memory stalls")).not.toHaveText("0");
+
+  await openConfiguration(page);
+  await page.getByLabel("New preset name").fill("E2E custom cache");
+  await page.getByRole("button", { name: "Save current settings" }).click();
+  await expect(page.locator(".preset-message")).toContainText("Saved E2E custom cache");
+  await page.getByLabel("Miss penalty").fill("13");
+  await page.getByLabel("New preset name").fill("E2E custom cache");
+  await page.getByRole("button", { name: "Save current settings" }).click();
+  await expect(page.locator(".preset-message")).toContainText("Updated E2E custom cache");
+  await page.reload();
+  await boot(page);
+  await openConfiguration(page);
+  await expect(page.getByLabel("Microarchitecture preset").locator("option", { hasText: "E2E custom cache" })).toHaveCount(1);
+  await page.getByLabel("Microarchitecture preset").selectOption({ label: "E2E custom cache" });
+  await page.getByRole("button", { name: "Load preset" }).click();
+  await expect(page.getByLabel("Miss penalty")).toHaveValue("13");
+
+  const legacyProject = {
+    format: "pipeline-lab-project", version: 1, name: "Legacy v1 project", source: "HALT\n",
+    configuration: { forwarding: "none", predictor: "one-bit", cacheEnabled: false }, breakpointLines: [],
+  };
+  await page.getByLabel("Import Pipeline Lab project").setInputFiles({ name: "legacy.pipeline.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(legacyProject)) });
+  await expect(page.getByLabel("Assembly source editor")).toHaveValue("HALT\n");
+  await openConfiguration(page);
+  await expect(page.getByLabel("Predictor entries")).toHaveValue("16");
+  await expect(page.getByLabel("Capacity (bytes)")).toHaveValue("256");
+
+  await page.getByRole("button", { name: "Learn" }).click();
+  const learning = page.getByRole("dialog", { name: "Learn the pipeline by doing" });
+  await learning.getByRole("button", { name: "Performance" }).click();
+  await learning.getByLabel("Benchmark suite").selectOption("custom");
+  await learning.getByRole("button", { name: "Run benchmark" }).click();
+  await expect(learning.locator(".performance-row")).toHaveCount(7);
+  await expect(learning.locator(".verified")).toHaveCount(7);
+  const reportPromise = page.waitForEvent("download");
+  await learning.getByRole("button", { name: "Export JSON" }).click();
+  const report = JSON.parse(await readDownload(await reportPromise));
+  expect(report.version).toBe(2);
+  expect(report.kind).toBe("custom");
+  expect(report.runs[0].configuration).toMatchObject({ predictorEntries: 16, cacheCapacity: 256, cacheBlockSize: 16, cacheAssociativity: 2, cacheHitLatency: 1, cacheMissPenalty: 8 });
+  await page.keyboard.press("Escape");
+  await openConfiguration(page);
+  await page.getByLabel("Microarchitecture preset").selectOption({ label: "E2E custom cache" });
+  await page.getByRole("button", { name: "Delete saved" }).click();
+  await expect(page.locator(".preset-message")).toContainText("Deleted E2E custom cache");
+  await expect(errors).toEqual([]);
+});
+
 test("assembler errors, dirty-source safety, breakpoints, memory edits while paused, and faults", async ({ page }) => {
   const errors = watchRuntimeErrors(page);
   await boot(page);
@@ -241,6 +328,8 @@ test("project persistence, downloads, learning center, ISA search, and Performan
   await page.locator(".more-controls button").filter({ hasText: "Download project" }).click();
   const projectDocument = JSON.parse(await readDownload(await projectDownloadPromise));
   expect(projectDocument.format).toBe("pipeline-lab-project");
+  expect(projectDocument.version).toBe(2);
+  expect(projectDocument.configuration).toMatchObject({ predictorEntries: 16, cacheCapacity: 256, cacheBlockSize: 16, cacheAssociativity: 2, cacheHitLatency: 1, cacheMissPenalty: 8 });
   expect(projectDocument.name).toBe("E2E portfolio lab");
 
   await page.getByRole("button", { name: "Step cycle" }).click();
@@ -249,6 +338,7 @@ test("project persistence, downloads, learning center, ISA search, and Performan
   await page.locator(".more-controls button").filter({ hasText: "Export execution trace" }).click();
   const traceDocument = JSON.parse(await readDownload(await traceDownloadPromise));
   expect(traceDocument.format).toBe("pipeline-lab-trace");
+  expect(traceDocument.version).toBe(2);
   expect(traceDocument.timeline.length).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "Learn" }).click();
@@ -265,11 +355,34 @@ test("project persistence, downloads, learning center, ISA search, and Performan
   await learning.getByRole("button", { name: "Export JSON" }).click();
   const benchmark = JSON.parse(await readDownload(await jsonPromise));
   expect(benchmark.format).toBe("pipeline-lab-benchmark");
+  expect(benchmark.version).toBe(2);
   expect(benchmark.runs).toHaveLength(4);
   const csvPromise = page.waitForEvent("download");
   await learning.getByRole("button", { name: "Export CSV" }).click();
   expect(await readDownload(await csvPromise)).toContain("architectural_match");
   await expect(errors).toEqual([]);
+});
+
+test("v1.3 boundary configuration, accessible cache controls, reset breakpoints, and initialized benchmarks", async ({ page }) => {
+  const invalidPreset={id:"custom-invalid",name:"Invalid stored geometry",configuration:{forwarding:"full",predictor:"two-bit",predictorEntries:3,cacheEnabled:true,cacheCapacity:256,cacheBlockSize:16,cacheAssociativity:2,cacheHitLatency:1,cacheMissPenalty:8}};
+  await page.addInitScript(preset=>localStorage.setItem("pipeline-lab-configuration-presets-v1",JSON.stringify([preset])),invalidPreset);
+  const errors=watchRuntimeErrors(page);await boot(page);await openConfiguration(page);
+  await expect(page.locator(".preset-message")).toContainText("Ignored 1 invalid saved preset");
+  const cacheToggle=page.getByRole("checkbox",{name:"Educational data cache"});await cacheToggle.focus();await page.keyboard.press("Space");await expect(cacheToggle).toBeChecked();
+  await page.getByLabel("Predictor entries").fill("1024");await page.getByLabel("Capacity (bytes)").fill("65536");await page.getByLabel("Block size (bytes)").fill("4");await page.getByLabel("Associativity (ways)").fill("1");await page.getByRole("button",{name:"Apply & reset processor"}).click();
+  await selectInspector(page,"Predictor");await expect(page.locator(".data-table tbody tr")).toHaveCount(1024);
+  await selectInspector(page,"Cache");await expect(page.locator(".cache-preview-note")).toContainText("Showing 512 of 16384 sets");await expect(page.locator(".cache-set")).toHaveCount(512);
+
+  await loadExample(page,"arithmetic");await page.locator('.gutter button[title="Toggle breakpoint on source line 3"]').click();await page.getByRole("button",{name:"Reset",exact:true}).click();await moreAction(page,"Run to breakpoint");await expect(page.locator(".status-pill")).toContainText("breakpoint");
+
+  const v2={format:"pipeline-lab-project",version:2,name:"V2 round trip",source:"LI r1, 1280\nLW r2, 0(r1)\nBEQ r2, r0, zero\nLI r3, 7\nHALT\nzero: LI r3, 9\nHALT\n",configuration:{forwarding:"full",predictor:"two-bit",predictorEntries:16,cacheEnabled:false,cacheCapacity:256,cacheBlockSize:16,cacheAssociativity:2,cacheHitLatency:1,cacheMissPenalty:8},breakpointLines:[]};
+  await page.getByLabel("Import Pipeline Lab project").setInputFiles({name:"v2.pipeline.json",mimeType:"application/json",buffer:Buffer.from(JSON.stringify(v2))});await expect(page.getByLabel("Assembly source editor")).toContainText("LI r1, 1280");
+  await setMemoryWord(page,1280,5);await page.getByRole("button",{name:"Learn"}).click();const learning=page.getByRole("dialog",{name:"Learn the pipeline by doing"});await learning.getByRole("button",{name:"Performance"}).click();await learning.getByRole("button",{name:"Run benchmark"}).click();await expect(learning.locator(".performance-row")).toHaveCount(4);await expect(learning.locator(".verified")).toHaveCount(4);
+  await expect(errors).toEqual([]);
+});
+
+test("infinite execution reaches a visible cycle-limit fault without destabilizing the UI", async ({ page }) => {
+  const errors=watchRuntimeErrors(page);await boot(page);const editor=page.getByLabel("Assembly source editor");await editor.fill("loop: J loop\n");await page.getByRole("button",{name:"Assemble"}).click();await runToCompletion(page);await expect(page.locator(".status-pill")).toContainText("fault");await selectInspector(page,"Event log");await expect(page.locator(".event-list")).toContainText("Cycle limit reached");await expect(errors).toEqual([]);
 });
 
 test("all bundled programs assemble and complete deterministically", async ({ page }) => {

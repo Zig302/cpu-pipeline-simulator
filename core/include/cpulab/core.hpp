@@ -56,7 +56,7 @@ struct Configuration {
   uint32_t predictorEntries{16};
   uint32_t memoryBytes{65536};
   uint32_t initialStackPointer{0xfffc};
-  uint64_t cycleLimit{100000};
+  uint64_t cycleLimit{10000};
   bool cacheEnabled{false};
   uint32_t cacheCapacity{256};
   uint32_t cacheBlockSize{16};
@@ -134,6 +134,8 @@ class DataCache {
   uint32_t readWord(uint32_t address) const;
   void writeWord(uint32_t address, uint32_t value);
   void patchByte(uint32_t address, uint8_t value);
+  uint8_t inspectByte(uint32_t address, const std::vector<uint8_t>& memory) const;
+  void overlayMemory(std::vector<uint8_t>& memory) const;
   const std::vector<std::vector<CacheLine>>& sets() const { return sets_; }
   const CacheStats& stats() const { return stats_; }
  private:
@@ -151,6 +153,8 @@ class Simulator {
   bool loadProgram(const std::string& source);
   void reset();
   void resetWithJson(const std::string& json);
+  std::string validateConfigurationJson(const std::string& json) const;
+  std::string applyConfigurationJson(const std::string& json);
   std::string stepCycle();
   std::string stepInstruction();
   std::string runCycles(uint32_t count);
@@ -160,6 +164,7 @@ class Simulator {
   std::string getEvents() const;
   std::string getTimeline() const;
   std::string compareReference() const;
+  std::string getInitialState() const;
   void setBreakpoint(uint32_t address, bool enabled = true);
   void setRegister(uint32_t index, uint32_t value);
   std::string readMemory(uint32_t address, uint32_t length) const;
@@ -176,12 +181,16 @@ class Simulator {
   struct Snapshot {
     std::array<uint32_t,32> regs{};
     std::vector<uint8_t> memory;
+    std::array<uint32_t,32> initialRegs{};
+    std::vector<uint8_t> initialMemory;
     uint32_t pc{0}; uint64_t nextId{1};
     PipelineSlot ifid,idex,exmem1,mem1mem2,mem2wb;
     Statistics stats{}; BranchPredictor predictor; DataCache cache;
     bool halted{false}, fetchStopped{false}, faulted{false};
+    bool referenceComparable{true};
     std::string status; uint32_t memWait{0}; bool memAccessStarted{false};
     size_t timelineSize{0};
+    bool droppedTimelineFrame{false}; TimelineFrame droppedFrame{};
   };
 
   Configuration cfg_{};
@@ -189,16 +198,21 @@ class Simulator {
   std::string source_;
   std::array<uint32_t,32> regs_{};
   std::vector<uint8_t> memory_;
+  std::array<uint32_t,32> initialRegs_{};
+  std::vector<uint8_t> initialMemory_;
   uint32_t pc_{0}; uint64_t nextId_{1};
   PipelineSlot ifid_{},idex_{},exmem1_{},mem1mem2_{},mem2wb_{};
   Statistics stats_{}; BranchPredictor predictor_{}; DataCache cache_{};
   bool halted_{false}, fetchStopped_{false}, faulted_{false};
+  bool referenceComparable_{true};
   std::string status_{"ready"};
   uint32_t memWait_{0}; bool memAccessStarted_{false};
   std::vector<Event> events_;
-  std::vector<TimelineFrame> timeline_;
+  std::deque<TimelineFrame> timeline_;
   std::deque<Snapshot> history_;
   std::set<uint32_t> breakpoints_;
+  bool batchRunning_{false};
+  bool skipSnapshots_{false};
 
   void snapshot();
   uint32_t loadWord(uint32_t address);
@@ -210,6 +224,7 @@ class Simulator {
   PipelineSlot fetchSlot(uint32_t address);
   PipelineSlot execute(const PipelineSlot& in, bool& redirect, uint32_t& target);
   std::string slotJson(const PipelineSlot& slot, const std::string& stage) const;
+  std::vector<uint8_t> coherentMemory() const;
 };
 
 struct ReferenceResult {
@@ -221,6 +236,9 @@ struct ReferenceResult {
 class ReferenceInterpreter {
  public:
   ReferenceResult run(const Program& program, const Configuration& cfg = {}, uint64_t maxSteps = 100000) const;
+  ReferenceResult runWithInitialState(const Program& program, const Configuration& cfg, uint64_t maxSteps,
+                                      const std::array<uint32_t,32>& initialRegisters,
+                                      const std::vector<uint8_t>& initialMemory) const;
 };
 
 }  // namespace cpulab

@@ -490,11 +490,11 @@ var wasmBinaryFile;
 function findWasmBinary() {
 
   if (Module['locateFile']) {
-    return locateFile('cpu_core.e107e1a1a88ad628.wasm');
+    return locateFile('cpu_core.12c7e7e26dfd0611.wasm');
   }
 
   // Use bundler-friendly `new URL(..., import.meta.url)` pattern; works in browsers too.
-  return new URL('cpu_core.e107e1a1a88ad628.wasm', import.meta.url).href;
+  return new URL('cpu_core.12c7e7e26dfd0611.wasm', import.meta.url).href;
 
 }
 
