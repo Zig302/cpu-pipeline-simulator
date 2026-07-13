@@ -53,6 +53,7 @@ test("Vite owns the referenced immutable, content-verified WASM artifact", async
   const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
   assert.equal(hash(js), manifest.jsSha256);
   assert.equal(hash(wasm), manifest.wasmSha256);
+  assert.equal(js.includes(13), false, "generated JavaScript must use checkout-stable LF line endings");
   await WebAssembly.compile(wasm);
   assert.match(adapter, /from "\.\/generated\/wasm-artifact"/);
   assert.match(artifact, new RegExp(manifest.js.replaceAll(".", "\\.")));
@@ -65,6 +66,8 @@ test("server QA tears down the full Windows worker process tree", async () => {
   assert.match(runner, /process\.platform === "win32"/);
   assert.match(runner, /spawn\("taskkill", \["\/pid", String\(server\.pid\), "\/t", "\/f"\]/);
   assert.match(runner, /finally \{\s*await stopServer\(\);\s*\}/);
+  assert.match(runner, /mkdtemp\(join\(tmpdir\(\), "cpulab-wasm-qa-"\)\)/);
+  assert.doesNotMatch(runner, /out[\\/]wasm/);
 });
 
 test("WebAssembly uses fixed memory for TextDecoder browser compatibility", async () => {

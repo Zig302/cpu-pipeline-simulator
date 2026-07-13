@@ -4,14 +4,16 @@ Pipeline Lab is a browser-based, cycle-accurate laboratory for a small 32-bit RI
 
 ![Pipeline Lab interface](public/og.png)
 
-## What's new in 1.2 (development)
+## What's new in 1.2
 
 - Run a four-configuration release matrix or focused forwarding, predictor, and cache benchmarks.
 - Compare normalized cycle bars, CPI, hazard stalls, memory stalls, branch recovery, and cache behavior.
 - Verify every benchmark result against the non-pipelined C++ reference interpreter.
 - Export reproducible benchmark reports as JSON or CSV for lab reports and portfolio analysis.
+- Trust a repeatable Chromium stress suite that exercises all examples, controls, inspectors, downloads, hazards, faults, stepping, and undo/replay.
+- Edit registers and memory safely whenever continuous execution is paused, including coherent edits to resident cache lines.
 
-See the [1.2 development notes](docs/release-notes-1.2.md) for scope and acceptance criteria.
+See the [1.2 release notes](docs/release-notes-1.2.md) for bug fixes and the complete acceptance matrix.
 
 ## Previously in 1.1
 
@@ -48,11 +50,11 @@ React controls ──JSON/Embind──> C++ six-stage engine
        └──── state / events / timeline ────┘
 ```
 
-The native and WebAssembly builds compile `core/src/core.cpp`. TypeScript only owns presentation, timers, and user interaction. See [architecture.md](docs/architecture.md), [isa.md](docs/isa.md), [pipeline-semantics.md](docs/pipeline-semantics.md), [browser support](docs/browser-support.md), and the [1.2 development notes](docs/release-notes-1.2.md).
+The native and WebAssembly builds compile `core/src/core.cpp`. TypeScript only owns presentation, timers, and user interaction. See [architecture.md](docs/architecture.md), [isa.md](docs/isa.md), [pipeline-semantics.md](docs/pipeline-semantics.md), [browser support](docs/browser-support.md), and the [1.2 release notes](docs/release-notes-1.2.md).
 
 ## Quick start
 
-Requirements: Node.js 22+, CMake 3.20+, a C++20 compiler, and Emscripten 6.0.2 for rebuilding WebAssembly. A verified, content-addressed WebAssembly artifact is committed under `frontend/src/generated`, so the app starts after the frontend install. Vite owns both the JavaScript loader and `.wasm` URL; nothing imports mutable files from `public`.
+Requirements: Node.js 22.13+, CMake 3.20+, a C++20 compiler, and Emscripten 6.0.2 for rebuilding WebAssembly. A verified, content-addressed WebAssembly artifact is committed under `frontend/src/generated`, so the app starts after the frontend install. Vite owns both the JavaScript loader and `.wasm` URL; nothing imports mutable files from `public`.
 
 ```bash
 npm ci
@@ -82,6 +84,13 @@ Frontend production build and integration tests:
 ```bash
 npm run build
 npm test
+```
+
+Install Chromium once and run the complete browser stress suite:
+
+```bash
+npm run test:e2e:install
+npm run test:e2e
 ```
 
 Runtime server QA (including real asset and MIME checks):
@@ -147,6 +156,7 @@ frontend/src/generated Content-addressed, Vite-managed WebAssembly artifacts
 examples/programs/    Standalone assembly programs
 docs/                 Architecture and timing specifications
 tests/                Frontend structure and WebAssembly integration tests
+tests/e2e/            Full Chromium interaction and deterministic replay suite
 ```
 
 ## Known limitations

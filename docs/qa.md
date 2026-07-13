@@ -6,7 +6,7 @@ Pipeline Lab has separate checks for the native CPU model, the WebAssembly bound
 
 `npm run wasm` builds Emscripten output into `out/wasm/wasm-artifact`. `scripts/publish-wasm.mjs` validates the binary, hashes the loader and binary, and atomically publishes immutable files under `frontend/src/generated`. The generated TypeScript module is the application's only import point.
 
-`npm run verify:wasm` checks the manifest, SHA-256 hashes, generated imports, file presence, and `WebAssembly.compile`. It runs automatically before development and production builds. This avoids importing JavaScript from Vite's `public` directory and avoids overwriting a file that a Windows development server is streaming.
+`npm run verify:wasm` checks the manifest, SHA-256 hashes, generated imports, file presence, and `WebAssembly.compile`. It runs automatically before development and production builds. This avoids importing JavaScript from Vite's `public` directory and avoids overwriting a file that a Windows development server is streaming. Dev-server QA reconstructs its publisher inputs in an isolated temporary directory, so it never depends on ignored build output that may be owned or locked by another Windows account.
 
 ## Automated commands
 
@@ -16,13 +16,14 @@ Pipeline Lab has separate checks for the native CPU model, the WebAssembly bound
 | `npm run wasm` | Fresh Emscripten build and immutable artifact publication |
 | `npm run verify:wasm` | Artifact integrity and WebAssembly validation |
 | `npm test` | Production frontend build plus Node integration tests |
+| `npm run test:e2e` | Launches Chromium and stress-tests all examples, controls, inspectors, downloads, and deterministic step/undo workflows |
 | `npm run lint` | TypeScript/React lint rules |
 | `npm run typecheck` | TypeScript type checking |
 | `npm run qa:dev` | Starts development, checks app and WASM assets, republishes WASM while serving, and rejects fatal server logs |
 | `npm run qa:prod` | Serves the production Cloudflare output through local Wrangler and checks fingerprinted HTML, JS, CSS, WASM, status codes, and MIME types |
-| `npm run qa:all` | WebAssembly verification, frontend tests, lint, and both server suites |
+| `npm run qa:all` | WebAssembly verification, production build/tests, typecheck, lint, both server suites, and the Chromium stress suite |
 
-The native suite covers assembler validation and encoding, all instruction classes, immediate limits, r0, dependency and forwarding cases, load-use and store-data hazards, no-forwarding and manual modes, branch flushing, loops and generated reference-model parity, undo/replay, pipeline fill/drain, predictor transitions, cache eviction/writeback, deterministic reset, and alignment faults.
+The native suite covers assembler validation and encoding, all instruction classes, immediate limits, r0, dependency and forwarding cases, load-use and store-data hazards, no-forwarding and manual modes, branch flushing, loops and generated reference-model parity, undo/replay, pipeline fill/drain, predictor transitions, cache eviction/writeback, paused-edit atomicity and cache coherence, deterministic reset, and alignment faults.
 
 ## Interactive browser acceptance checklist
 
@@ -43,4 +44,4 @@ Run `npm run dev`, open `http://localhost:3000`, and verify these workflows afte
 
 ## Release gate
 
-A release is acceptable when native tests, a fresh WebAssembly build, artifact verification, production build, typecheck, lint, dev-server QA, production-server QA, and the interactive smoke checklist pass. Record any check that could not be freshly executed as an explicit limitation rather than inferring success from a different layer.
+A release is acceptable when native tests, a fresh WebAssembly build, artifact verification, production build, typecheck, lint, dev-server QA, production-server QA, and the Chromium stress suite pass. The manual checklist remains useful for exploratory visual review. Record any check that could not be freshly executed as an explicit limitation rather than inferring success from a different layer.

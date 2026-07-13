@@ -101,6 +101,12 @@ int main() {
     for(int guard=0;guard<200&&!s.isHalted();++guard){s.stepCycle();auto committed=s.getState();CHECK(s.restorePreviousCycle());s.stepCycle();CHECK(s.getState()==committed);}
     CHECK(s.isHalted());CHECK(s.registers()[3]==15);CHECK(s.statistics().dataStallCycles==5);
   });
+  test("paused register and memory edits are atomic and deterministic", [] {
+    Simulator s;CHECK(s.loadProgram("ADDI r1,r0,1\nHALT\n"));s.stepCycle();s.setRegister(7,99);CHECK(s.registers()[7]==99);
+    CHECK(s.writeMemory(512,"120,86,52,18"));CHECK(s.memory()[512]==0x78&&s.memory()[515]==0x12);
+    CHECK(!s.writeMemory(520,"1,999,2"));CHECK(s.memory()[520]==0&&s.memory()[521]==0);
+    CHECK(!s.writeMemory(uint32_t(s.memory().size()-1),"1,2"));CHECK(s.memory().back()==0);
+  });
   test("pipeline fills and drains in N plus five cycles", [] {
     auto s=run("ADDI r1,r0,1\nADDI r2,r0,2\nHALT\n");CHECK(s.statistics().cycles==8);CHECK(s.statistics().retired==3);
   });
@@ -110,6 +116,9 @@ int main() {
   });
   test("cache hit, miss, eviction and dirty writeback", [] {
     Configuration cfg;cfg.cacheCapacity=16;cfg.cacheBlockSize=4;cfg.cacheAssociativity=1;cfg.cacheHitLatency=1;cfg.cacheMissPenalty=5;DataCache c;c.reset(cfg);std::vector<uint8_t> mem(64,0);mem[0]=11;CHECK(c.beginAccess(0,false,mem)==6);CHECK(c.readWord(0)==11);CHECK(c.beginAccess(0,false,mem)==1);c.beginAccess(0,true,mem);c.writeWord(0,0x44332211);CHECK(c.beginAccess(16,false,mem)==6);CHECK(c.stats().hits==2);CHECK(c.stats().misses==2);CHECK(c.stats().dirtyWritebacks==1);CHECK(mem[0]==0x11&&mem[1]==0x22&&mem[2]==0x33&&mem[3]==0x44);
+  });
+  test("paused memory patches remain coherent with resident cache lines", [] {
+    Configuration cfg;cfg.cacheCapacity=16;cfg.cacheBlockSize=4;cfg.cacheAssociativity=1;DataCache c;c.reset(cfg);std::vector<uint8_t> mem(64,0);mem[0]=1;c.beginAccess(0,false,mem);CHECK(c.readWord(0)==1);auto reads=c.stats().reads;c.patchByte(0,9);CHECK(c.readWord(0)==9);CHECK(c.stats().reads==reads);
   });
   test("reset and replay are deterministic", [] {
     Simulator s;CHECK(s.loadProgram("LI r1,3\nADDI r2,r1,4\nHALT\n"));s.runUntilCompletion();auto first=s.getState();s.reset();s.runUntilCompletion();CHECK(s.getState()==first);

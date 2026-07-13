@@ -27,7 +27,8 @@ export function LearningCenter({ open, state, reference, activeLessonId, benchma
   if (!open) return null;
   const active = lessons.find(lesson => lesson.id === activeLessonId) ?? lessons[0];
   const nextCheckpoint = checkpointIndex(active, state, reference);
-  const visibleIsa = isaReference.filter(entry => `${entry.mnemonic} ${entry.syntax} ${entry.description}`.toLowerCase().includes(query.toLowerCase()));
+  const searchTerms=query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const visibleIsa = isaReference.filter(entry => {const haystack=`${entry.mnemonic} ${entry.syntax} ${entry.description}`.toLowerCase();return searchTerms.every(term=>haystack.includes(term));});
   return <div className="learn-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="learn-modal" role="dialog" aria-modal="true" aria-labelledby="learn-title">
       <header><div><span className="eyebrow">LEARNING CENTER</span><h2 id="learn-title">Learn the pipeline by doing</h2></div><button ref={closeRef} onClick={onClose} aria-label="Close learning center">×</button></header>

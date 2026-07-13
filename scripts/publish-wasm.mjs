@@ -10,10 +10,13 @@ const output = resolve(root, "frontend/src/generated");
 const [sourceJavaScript, wasm] = await Promise.all([readFile(sourceJs), readFile(sourceWasm)]);
 
 await WebAssembly.compile(wasm);
-const build = createHash("sha256").update("vite-managed-v1").update(sourceJavaScript).update(wasm).digest("hex").slice(0, 16);
+// Emscripten follows the host line ending. Normalize the text loader before
+// hashing so the manifest remains valid after Git checkouts on every platform.
+const normalizedSourceJavaScript = Buffer.from(sourceJavaScript.toString("utf8").replaceAll("\r\n", "\n"));
+const build = createHash("sha256").update("vite-managed-v1").update(normalizedSourceJavaScript).update(wasm).digest("hex").slice(0, 16);
 const jsName = `cpu_core.${build}.js`;
 const wasmName = `cpu_core.${build}.wasm`;
-const js = Buffer.from(sourceJavaScript.toString("utf8").replaceAll("'cpu_core.wasm'", `'${wasmName}'`));
+const js = Buffer.from(normalizedSourceJavaScript.toString("utf8").replaceAll("'cpu_core.wasm'", `'${wasmName}'`));
 const manifest = {
   build,
   js: jsName,

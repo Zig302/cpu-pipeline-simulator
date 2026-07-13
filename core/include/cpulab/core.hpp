@@ -133,6 +133,7 @@ class DataCache {
   uint32_t beginAccess(uint32_t address, bool write, std::vector<uint8_t>& memory);
   uint32_t readWord(uint32_t address) const;
   void writeWord(uint32_t address, uint32_t value);
+  void patchByte(uint32_t address, uint8_t value);
   const std::vector<std::vector<CacheLine>>& sets() const { return sets_; }
   const CacheStats& stats() const { return stats_; }
  private:

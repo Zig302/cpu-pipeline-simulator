@@ -212,7 +212,7 @@ bool BranchPredictor::predict(uint32_t pc) const {
 uint8_t BranchPredictor::state(uint32_t pc) const { const auto&e=table_[(pc/4)%table_.size()];return e.valid&&e.tagPc==pc?e.state:mode_==PredictorMode::TwoBit?1:0; }
 std::pair<uint8_t,uint8_t> BranchPredictor::update(uint32_t pc,bool taken) {
   auto& e=table_[(pc/4)%table_.size()]; uint8_t before=state(pc); e.valid=true;e.tagPc=pc;e.recentTaken=taken;
-  if(mode_==PredictorMode::OneBit)e.state=taken?1:0; else if(mode_==PredictorMode::TwoBit)e.state=taken?std::min<int>(3,before+1):std::max<int>(0,before-1); else e.state=taken?3:0;
+  if(mode_==PredictorMode::OneBit)e.state=uint8_t(taken?1:0); else if(mode_==PredictorMode::TwoBit)e.state=uint8_t(taken?std::min<int>(3,before+1):std::max<int>(0,before-1)); else e.state=uint8_t(taken?3:0);
   return {before,e.state};
 }
 
@@ -220,17 +220,18 @@ void DataCache::reset(const Configuration& cfg) {
   cfg_=cfg;stats_={};tick_=0; uint32_t ways=std::max(1u,cfg.cacheAssociativity), block=std::max(4u,cfg.cacheBlockSize), count=std::max(1u,cfg.cacheCapacity/(block*ways));
   sets_.assign(count,std::vector<CacheLine>(ways)); for(auto& set:sets_)for(auto& line:set)line.data.assign(block,0);
 }
-CacheLine* DataCache::find(uint32_t a) { uint32_t block=a/cfg_.cacheBlockSize,set=block%sets_.size(),tag=block/sets_.size();for(auto&l:sets_[set])if(l.valid&&l.tag==tag)return &l;return nullptr; }
+CacheLine* DataCache::find(uint32_t a) { uint32_t block=a/cfg_.cacheBlockSize,set=uint32_t(block%sets_.size()),tag=uint32_t(block/sets_.size());for(auto&l:sets_[set])if(l.valid&&l.tag==tag)return &l;return nullptr; }
 uint32_t DataCache::beginAccess(uint32_t a,bool wr,std::vector<uint8_t>& mem) {
   wr?++stats_.writes:++stats_.reads; ++tick_; if(auto*l=find(a)){++stats_.hits;l->lru=tick_;return std::max(1u,cfg_.cacheHitLatency);}
-  ++stats_.misses; uint32_t block=a/cfg_.cacheBlockSize,set=block%sets_.size(),tag=block/sets_.size(),base=(a/cfg_.cacheBlockSize)*cfg_.cacheBlockSize;
+  ++stats_.misses; uint32_t block=a/cfg_.cacheBlockSize,set=uint32_t(block%sets_.size()),tag=uint32_t(block/sets_.size()),base=(a/cfg_.cacheBlockSize)*cfg_.cacheBlockSize;
   auto& ways=sets_[set]; auto* victim=&ways[0]; for(auto&l:ways)if(!l.valid){victim=&l;break;}else if(l.lru<victim->lru)victim=&l;
-  if(victim->valid&&victim->dirty){++stats_.dirtyWritebacks;uint32_t oldBase=((victim->tag*sets_.size())+set)*cfg_.cacheBlockSize;for(uint32_t i=0;i<cfg_.cacheBlockSize&&oldBase+i<mem.size();++i)mem[oldBase+i]=victim->data[i];}
+  if(victim->valid&&victim->dirty){++stats_.dirtyWritebacks;uint32_t oldBase=uint32_t(((victim->tag*sets_.size())+set)*cfg_.cacheBlockSize);for(uint32_t i=0;i<cfg_.cacheBlockSize&&oldBase+i<mem.size();++i)mem[oldBase+i]=victim->data[i];}
   victim->valid=true;victim->dirty=false;victim->tag=tag;victim->lru=tick_;for(uint32_t i=0;i<cfg_.cacheBlockSize;++i)victim->data[i]=(base+i<mem.size())?mem[base+i]:0;
   uint32_t latency=std::max(1u,cfg_.cacheHitLatency)+cfg_.cacheMissPenalty;stats_.stallCycles+=latency-1;return latency;
 }
-uint32_t DataCache::readWord(uint32_t a) const { uint32_t block=a/cfg_.cacheBlockSize,set=block%sets_.size(),tag=block/sets_.size(),off=a%cfg_.cacheBlockSize;for(const auto&l:sets_[set])if(l.valid&&l.tag==tag)return uint32_t(l.data[off])|(uint32_t(l.data[off+1])<<8)|(uint32_t(l.data[off+2])<<16)|(uint32_t(l.data[off+3])<<24);return 0; }
+uint32_t DataCache::readWord(uint32_t a) const { uint32_t block=a/cfg_.cacheBlockSize,set=uint32_t(block%sets_.size()),tag=uint32_t(block/sets_.size()),off=a%cfg_.cacheBlockSize;for(const auto&l:sets_[set])if(l.valid&&l.tag==tag)return uint32_t(l.data[off])|(uint32_t(l.data[off+1])<<8)|(uint32_t(l.data[off+2])<<16)|(uint32_t(l.data[off+3])<<24);return 0; }
 void DataCache::writeWord(uint32_t a,uint32_t v) { if(auto*l=find(a)){uint32_t o=a%cfg_.cacheBlockSize;l->data[o]=uint8_t(v);l->data[o+1]=uint8_t(v>>8);l->data[o+2]=uint8_t(v>>16);l->data[o+3]=uint8_t(v>>24);l->dirty=true;l->lru=++tick_;} }
+void DataCache::patchByte(uint32_t a,uint8_t v){if(auto*l=find(a))l->data[a%cfg_.cacheBlockSize]=v;}
 
 Simulator::Simulator(){ reset(); }
 std::string Simulator::assemble(const std::string& source) {
@@ -320,9 +321,9 @@ std::string Simulator::runCycles(uint32_t n){for(uint32_t i=0;i<n&&!halted_&&!fa
 std::string Simulator::runUntilCompletion(uint32_t n){return runCycles(n);}
 std::string Simulator::runUntilBreakpoint(uint32_t n){for(uint32_t i=0;i<n&&!halted_&&!faulted_;++i){if(breakpoints_.count(pc_)){status_="breakpoint";break;}stepCycle();}return getState();}
 void Simulator::setBreakpoint(uint32_t a,bool on){if(on)breakpoints_.insert(a);else breakpoints_.erase(a);}
-void Simulator::setRegister(uint32_t i,uint32_t v){if(i>0&&i<32&&!halted_&&status_!="running")regs_[i]=v;regs_[0]=0;}
+void Simulator::setRegister(uint32_t i,uint32_t v){if(i>0&&i<32)regs_[i]=v;regs_[0]=0;}
 std::string Simulator::readMemory(uint32_t a,uint32_t len)const{std::ostringstream o;o<<'[';for(uint32_t i=0;i<len&&uint64_t(a)+i<memory_.size();++i){if(i)o<<',';o<<unsigned(memory_[a+i]);}o<<']';return o.str();}
-bool Simulator::writeMemory(uint32_t a,const std::string& csv){if(status_=="running")return false;std::istringstream in(csv);std::string x;uint32_t i=0;while(std::getline(in,x,',')){int64_t v=0;if(!parseInteger(trim(x),v)||v<0||v>255||uint64_t(a)+i>=memory_.size())return false;memory_[a+i++]=uint8_t(v);}return true;}
+bool Simulator::writeMemory(uint32_t a,const std::string& csv){std::istringstream in(csv);std::string x;std::vector<uint8_t> bytes;while(std::getline(in,x,',')){int64_t v=0;if(!parseInteger(trim(x),v)||v<0||v>255)return false;bytes.push_back(uint8_t(v));}if(bytes.empty()||uint64_t(a)+bytes.size()>memory_.size())return false;for(size_t i=0;i<bytes.size();++i){memory_[a+i]=bytes[i];if(cfg_.cacheEnabled)cache_.patchByte(a+uint32_t(i),bytes[i]);}events_.push_back({"memory-edit",stats_.cycles,"",{},-1,"ui","Edited "+std::to_string(bytes.size())+" byte(s) at address "+std::to_string(a)+"."});return true;}
 
 std::string Simulator::slotJson(const PipelineSlot&s,const std::string&stage)const{std::ostringstream o;o<<"{\"stage\":\""<<stage<<"\",\"valid\":"<<(s.valid?"true":"false")<<",\"stalled\":"<<(s.stalled?"true":"false")<<",\"bubble\":"<<(s.bubble?"true":"false")<<",\"squashed\":"<<(s.squashed?"true":"false")<<",\"id\":"<<s.id<<",\"pc\":"<<s.pc<<",\"raw\":"<<s.raw<<",\"op\":\""<<opName(s.decoded.op)<<"\",\"assembly\":\""<<jsonEscape(s.assembly)<<"\",\"sourceLine\":"<<s.sourceLine<<",\"rs1\":"<<unsigned(s.decoded.rs1)<<",\"rs2\":"<<unsigned(s.decoded.rs2)<<",\"rd\":"<<unsigned(s.decoded.rd)<<",\"usesRs1\":"<<(s.decoded.usesRs1?"true":"false")<<",\"usesRs2\":"<<(s.decoded.usesRs2?"true":"false")<<",\"writesRd\":"<<(s.decoded.writesRd?"true":"false")<<",\"isLoad\":"<<(s.decoded.isLoad?"true":"false")<<",\"isStore\":"<<(s.decoded.isStore?"true":"false")<<",\"immediate\":"<<s.decoded.imm<<",\"rs1Value\":"<<s.rs1Value<<",\"rs2Value\":"<<s.rs2Value<<",\"operandA\":"<<s.operandA<<",\"operandB\":"<<s.operandB<<",\"aluResult\":"<<s.aluResult<<",\"memoryAddress\":"<<s.memoryAddress<<",\"memoryData\":"<<s.memoryData<<",\"writeValue\":"<<s.writeValue<<",\"regWrite\":"<<(s.regWrite?"true":"false")<<",\"memRead\":"<<(s.memRead?"true":"false")<<",\"memWrite\":"<<(s.memWrite?"true":"false")<<",\"predictedTaken\":"<<(s.predictedTaken?"true":"false")<<",\"actualTaken\":"<<(s.actualTaken?"true":"false")<<",\"mispredicted\":"<<(s.mispredicted?"true":"false")<<'}';return o.str();}
 std::string Simulator::getEvents()const{std::ostringstream o;o<<'[';for(size_t i=0;i<events_.size();++i){if(i)o<<',';auto&e=events_[i];o<<"{\"type\":\""<<e.type<<"\",\"cycle\":"<<e.cycle<<",\"stage\":\""<<e.stage<<"\",\"instructionIds\":[";for(size_t k=0;k<e.instructionIds.size();++k){if(k)o<<',';o<<e.instructionIds[k];}o<<"],\"reg\":"<<e.reg<<",\"source\":\""<<e.source<<"\",\"message\":\""<<jsonEscape(e.message)<<"\"}";}o<<']';return o.str();}

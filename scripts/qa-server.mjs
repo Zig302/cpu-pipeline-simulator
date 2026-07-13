@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { readFile, readdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -43,13 +44,31 @@ async function expectAsset(path, contentType) {
   await response.arrayBuffer();
 }
 async function runPublisher() {
-  await new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [resolve(root, "scripts/publish-wasm.mjs")], { cwd: root, stdio: "pipe" });
-    let diagnostics = "";
-    child.stdout.on("data", (chunk) => diagnostics += chunk);
-    child.stderr.on("data", (chunk) => diagnostics += chunk);
-    child.on("exit", (code) => code === 0 ? resolvePromise() : reject(new Error(diagnostics)));
-  });
+  // Reconstruct the raw Emscripten pair from the immutable published artifact.
+  // This keeps server QA independent of ignored build directories, which may
+  // belong to another Windows account in sandboxed or CI environments.
+  const temporary = await mkdtemp(join(tmpdir(), "cpulab-wasm-qa-"));
+  try {
+    const generated = resolve(root, "frontend/src/generated");
+    const [publishedJavaScript, wasm] = await Promise.all([
+      readFile(resolve(generated, manifest.js), "utf8"),
+      readFile(resolve(generated, manifest.wasm)),
+    ]);
+    const rawJavaScript = publishedJavaScript.replaceAll(`'${manifest.wasm}'`, "'cpu_core.wasm'");
+    if (rawJavaScript === publishedJavaScript) throw new Error("Published WASM loader did not reference its fingerprinted binary.");
+    const sourceJs = resolve(temporary, "cpu_core.js");
+    const sourceWasm = resolve(temporary, "cpu_core.wasm");
+    await Promise.all([writeFile(sourceJs, rawJavaScript), writeFile(sourceWasm, wasm)]);
+    await new Promise((resolvePromise, reject) => {
+      const child = spawn(process.execPath, [resolve(root, "scripts/publish-wasm.mjs"), sourceJs, sourceWasm], { cwd: root, stdio: "pipe" });
+      let diagnostics = "";
+      child.stdout.on("data", (chunk) => diagnostics += chunk);
+      child.stderr.on("data", (chunk) => diagnostics += chunk);
+      child.on("exit", (code) => code === 0 ? resolvePromise() : reject(new Error(diagnostics)));
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 }
 
 async function stopServer() {
