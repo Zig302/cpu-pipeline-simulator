@@ -382,15 +382,7 @@ assert(globalThis.Int32Array && globalThis.Float64Array && Int32Array.prototype.
        'JS engine does not provide full typed array support');
 
 function preRun() {
-  var preRun = Module['preRun'];
-  if (preRun) {
-    if (typeof preRun == 'function') preRun = [preRun];
-    onPreRuns.push(...preRun);
-  }
-  consumedModuleProp('preRun');
-  // Begin ATPRERUNS hooks
-  callRuntimeCallbacks(onPreRuns);
-  // End ATPRERUNS hooks
+  // No ATPRERUNS hooks
 }
 
 function initRuntime() {
@@ -411,23 +403,13 @@ function initRuntime() {
 function postRun() {
   checkStackCookie();
 
-  var postRun = Module['postRun'];
-  if (postRun) {
-    if (typeof postRun == 'function') postRun = [postRun];
-    onPostRuns.push(...postRun);
-  }
-  consumedModuleProp('postRun');
-
-  // Begin ATPOSTRUNS hooks
-  callRuntimeCallbacks(onPostRuns);
-  // End ATPOSTRUNS hooks
+  // No ATPOSTRUNS hooks
 }
 
 /**
  * @param {string|number=} what
  */
 function abort(what) {
-  Module['onAbort']?.(what);
 
   what = `Aborted(${what})`;
   // TODO(sbc): Should we remove printing and leave it up to whoever
@@ -490,15 +472,18 @@ var wasmBinaryFile;
 function findWasmBinary() {
 
   if (Module['locateFile']) {
-    return locateFile('cpu_core.12c7e7e26dfd0611.wasm');
+    return locateFile('cpu_core.a98ebbc278a78ab5.wasm');
   }
 
   // Use bundler-friendly `new URL(..., import.meta.url)` pattern; works in browsers too.
-  return new URL('cpu_core.12c7e7e26dfd0611.wasm', import.meta.url).href;
+  return new URL('cpu_core.a98ebbc278a78ab5.wasm', import.meta.url).href;
 
 }
 
 function getBinarySync(file) {
+  if (file == wasmBinaryFile && wasmBinary) {
+    return new Uint8Array(wasmBinary);
+  }
   if (readBinary) {
     return readBinary(file);
   }
@@ -599,24 +584,6 @@ async function createWasm() {
 
   var info = getWasmImports();
 
-  // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
-  // to manually instantiate the Wasm module themselves. This allows pages to
-  // run the instantiation parallel to any other async startup actions they are
-  // performing.
-  // Also pthreads and wasm workers initialize the wasm instance through this
-  // path.
-  var instantiateWasm = Module['instantiateWasm'];
-  if (instantiateWasm) {
-    return new Promise((resolve) => {
-      try {
-        instantiateWasm(info, (inst) => resolve(receiveInstance(inst)));
-      } catch(e) {
-        err(`Module.instantiateWasm callback failed with error: ${e}`);
-        throw e;
-      }
-    });
-  }
-
   wasmBinaryFile ??= findWasmBinary();
   var result = await instantiateAsync(wasmBinary, wasmBinaryFile, info);
   var exports = receiveInstantiationResult(result);
@@ -672,12 +639,6 @@ async function createWasm() {
         callbacks.shift()(Module);
       }
     };
-  var onPostRuns = [];
-  var addOnPostRun = (cb) => onPostRuns.push(cb);
-
-  var onPreRuns = [];
-  var addOnPreRun = (cb) => onPreRuns.push(cb);
-
 
   
     /**
@@ -698,8 +659,6 @@ async function createWasm() {
       default: abort(`invalid type for getValue: ${type}`);
     }
   }
-
-  var noExitRuntime = true;
 
   function ptrToString(ptr) {
       assert(typeof ptr === 'number', `ptrToString expects a number, got ${typeof ptr}`);
@@ -2821,9 +2780,7 @@ assert(emval_handles.length === 5 * 2);
 {
 
   // Begin ATMODULES hooks
-  if (Module['noExitRuntime']) noExitRuntime = Module['noExitRuntime'];
-if (Module['print']) out = Module['print'];
-if (Module['printErr']) err = Module['printErr'];
+  if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];
 
 Module['FS_createDataFile'] = FS.createDataFile;
 Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
@@ -2832,8 +2789,8 @@ Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
 
   checkIncomingModuleAPI();
 
-  if (Module['arguments']) programArgs = Module['arguments'];
-  if (Module['thisProgram']) thisProgram = Module['thisProgram'];
+  
+  
 
   // Assertions on removed incoming Module JS APIs.
   assert(typeof Module['memoryInitializerPrefixURL'] == 'undefined', 'Module.memoryInitializerPrefixURL option was removed, use Module.locateFile instead');
@@ -2851,16 +2808,6 @@ Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
   assert(typeof Module['wasmMemory'] == 'undefined', 'Use of `wasmMemory` detected.  Use -sIMPORTED_MEMORY to define wasmMemory externally');
   assert(typeof Module['INITIAL_MEMORY'] == 'undefined', 'Detected runtime INITIAL_MEMORY setting.  Use -sIMPORTED_MEMORY to define wasmMemory dynamically');
 
-  var preInit = Module['preInit'];
-  if (preInit) {
-    if (typeof preInit == 'function') Module['preInit'] = preInit = [preInit];
-    // Written as a loop so that preInit functions that themselves add more
-    // preInit functions.  Is this actually needed?
-    while (preInit.length > 0) {
-      preInit.shift()();
-    }
-  }
-  consumedModuleProp('preInit');
 }
 
 // Begin runtime exports
@@ -2909,10 +2856,12 @@ Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
   'getUniqueRunDependency',
   'addRunDependency',
   'removeRunDependency',
+  'addOnPreRun',
   'addOnInit',
   'addOnPostCtor',
   'addOnPreMain',
   'addOnExit',
+  'addOnPostRun',
   'STACK_SIZE',
   'STACK_ALIGN',
   'POINTER_SIZE',
@@ -3093,8 +3042,6 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'wasmTable',
   'wasmMemory',
   'noExitRuntime',
-  'addOnPreRun',
-  'addOnPostRun',
   'freeTableIndexes',
   'functionsInTableMap',
   'setValue',
@@ -3237,6 +3184,31 @@ unexportedSymbols.forEach(unexportedRuntimeSymbol);
 // end include: postlibrary.js
 
 function checkIncomingModuleAPI() {
+  ignoredModuleProp('ENVIRONMENT');
+  ignoredModuleProp('arguments');
+  ignoredModuleProp('canvas');
+  ignoredModuleProp('dynamicLibraries');
+  ignoredModuleProp('elementPointerLock');
+  ignoredModuleProp('instantiateWasm');
+  ignoredModuleProp('monitorRunDependencies');
+  ignoredModuleProp('noExitRuntime');
+  ignoredModuleProp('noInitialRun');
+  ignoredModuleProp('onAbort');
+  ignoredModuleProp('onExit');
+  ignoredModuleProp('onRuntimeInitialized');
+  ignoredModuleProp('postRun');
+  ignoredModuleProp('preInit');
+  ignoredModuleProp('preRun');
+  ignoredModuleProp('print');
+  ignoredModuleProp('printErr');
+  ignoredModuleProp('setStatus');
+  ignoredModuleProp('statusMessage');
+  ignoredModuleProp('stderr');
+  ignoredModuleProp('stdin');
+  ignoredModuleProp('stdout');
+  ignoredModuleProp('thisProgram');
+  ignoredModuleProp('wasm');
+  ignoredModuleProp('websocket');
   ignoredModuleProp('fetchSettings');
   ignoredModuleProp('logReadFiles');
   ignoredModuleProp('loadSplitModule');
@@ -3263,7 +3235,6 @@ function checkIncomingModuleAPI() {
   ignoredModuleProp('onFullScreen');
   ignoredModuleProp('INITIAL_MEMORY');
   ignoredModuleProp('wasmMemory');
-  ignoredModuleProp('wasmBinary');
 }
 
 // Imports from the Wasm binary.
@@ -3380,21 +3351,9 @@ async function run() {
 
   preRun();
 
-  var setStatus = Module['setStatus'];
-  if (setStatus) {
-    setStatus('Running...');
-    // Yield to the event loop to allow the browser to paint "Running..."
-    await new Promise((resolve) => setTimeout(resolve, 1));
-    // Then we want to clear the status text, but only after the rest of this function runs.
-    setTimeout(setStatus, 1, '');
-  }
-
   if (ABORT) return;
 
   initRuntime();
-
-  Module['onRuntimeInitialized']?.();
-  consumedModuleProp('onRuntimeInitialized');
 
   assert(!Module['_main'], 'compiled without a main, but one is present. if you added it from JS, use Module["onRuntimeInitialized"]');
 

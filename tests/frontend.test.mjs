@@ -56,19 +56,25 @@ test("Vite owns the referenced immutable, content-verified WASM artifact", async
   assert.equal(js.includes(13), false, "generated JavaScript must use checkout-stable LF line endings");
   await WebAssembly.compile(wasm);
   assert.match(adapter, /from "\.\/generated\/wasm-artifact"/);
+  assert.match(adapter, /let binaryPromise/);
+  assert.match(adapter, /wasmBinary: new Uint8Array/);
   assert.match(artifact, new RegExp(manifest.js.replaceAll(".", "\\.")));
   assert.match(artifact, new RegExp(`${manifest.wasm.replaceAll(".", "\\.")}\\?url`));
   await assert.rejects(readFile(new URL("public/wasm/cpu_core.js", root)), { code: "ENOENT" });
 });
 
 test("server QA tears down the full Windows worker process tree", async () => {
-  const runner = await readFile(new URL("scripts/qa-server.mjs", root), "utf8");
+  const [runner, browserRunner, pkg] = await Promise.all([readFile(new URL("scripts/qa-server.mjs", root), "utf8"),readFile(new URL("scripts/run-e2e.mjs", root), "utf8"),readFile(new URL("package.json", root), "utf8")]);
   assert.match(runner, /process\.platform === "win32"/);
   assert.match(runner, /spawn\("taskkill", \["\/pid", String\(server\.pid\), "\/t", "\/f"\]/);
   assert.match(runner, /Date\.now\(\) \+ 60_000/);
   assert.match(runner, /finally \{\s*await stopServer\(\);\s*\}/);
   assert.match(runner, /mkdtemp\(join\(tmpdir\(\), "cpulab-wasm-qa-"\)\)/);
   assert.doesNotMatch(runner, /out[\\/]wasm/);
+  assert.match(browserRunner, /PLAYWRIGHT_EXTERNAL_SERVER/);
+  assert.match(browserRunner, /spawn\("taskkill",\["\/pid",String\(pid\),"\/t","\/f"\]/);
+  assert.match(browserRunner, /finally\{\s*await stopTree\(server\.pid\);\s*\}/);
+  assert.equal(JSON.parse(pkg).scripts["test:e2e"],"node scripts/run-e2e.mjs");
 });
 
 test("WebAssembly uses fixed memory for TextDecoder browser compatibility", async () => {
@@ -117,7 +123,7 @@ test("project persistence and trace export are versioned and validated", async (
     readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
     readFile(new URL("package.json", root), "utf8"),
   ]);
-  assert.equal(JSON.parse(pkg).version, "1.3.0");
+  assert.equal(JSON.parse(pkg).version, "1.4.0");
   assert.match(project, /format: "pipeline-lab-project"/);
   assert.match(project, /Unsupported Pipeline Lab project format/);
   assert.match(project, /format: "pipeline-lab-trace"/);
@@ -184,8 +190,8 @@ test("v1.3 microarchitecture settings are core-validated, preset-backed, and per
   assert.match(bindings, /validateConfigurationJson/);
   assert.match(bindings, /applyConfigurationJson/);
   assert.match(types, /configuration: ProcessorConfiguration/);
-  assert.match(project, /version: 2/);
-  assert.match(project, /\[1, 2\]/);
+  assert.match(project, /version: 3/);
+  assert.match(project, /\[1, 2, 3\]/);
   assert.match(benchmark, /kind === "custom"/);
   assert.match(benchmark, /predictor_entries/);
 });
@@ -203,6 +209,27 @@ test("keyboard and accessibility landmarks are present", async () => {
   assert.match(center, /aria-current=\{current \? "step"/);
   assert.match(styles, /prefers-reduced-motion:reduce/);
   assert.match(styles, /:focus-visible/);
+});
+
+test("v1.4 debugger is core-owned, time-travel aware, and project-persisted", async () => {
+  const [component, types, bindings, core, project, styles] = await Promise.all([
+    readFile(new URL("frontend/src/CpuLab.tsx", root), "utf8"),
+    readFile(new URL("frontend/src/types.ts", root), "utf8"),
+    readFile(new URL("core/src/bindings.cpp", root), "utf8"),
+    readFile(new URL("core/src/core.cpp", root), "utf8"),
+    readFile(new URL("frontend/src/project.ts", root), "utf8"),
+    readFile(new URL("frontend/src/lab.css", root), "utf8"),
+  ]);
+  for (const method of ["setRegisterWatchpoint", "setMemoryWatchpoint", "getHistory", "restoreCycle"]) {
+    assert.match(types, new RegExp(method)); assert.match(bindings, new RegExp(method)); assert.match(core, new RegExp(method));
+  }
+  for (const field of ["watchpointKind", "oldValue", "newValue", "registerWatchpoints", "memoryWatchpoints"]) assert.match(types, new RegExp(field));
+  assert.match(component, /Word-store watchpoints require an aligned/);
+  assert.match(component, /Select freely; rewind is an explicit action/);
+  assert.match(component, /s\.status==="watchpoint"/);
+  assert.match(project, /version: 3/);
+  assert.match(project, /project\.version === 3/);
+  assert.match(styles, /v1\.4 debugger and snapshot-backed time travel/);
 });
 
 test("stage explanations follow live cycle state and expose real register reads", async () => {

@@ -36,4 +36,4 @@ The **Current + presets** suite creates an independent C++ WebAssembly simulator
 
 ## Project migration
 
-Version 2 project files store the complete processor configuration. Version 1 projects remain accepted; omitted v1.3 fields receive the defaults in the table above before the configuration is validated by C++. Invalid imported values do not replace the running program.
+Version 3 project files store the complete processor configuration plus v1.4 debugger watchpoints. Version 1 and 2 projects remain accepted; omitted v1.3 fields receive the defaults in the table above and legacy projects receive empty watchpoint sets before the configuration is validated by C++. Invalid imported values do not replace the running program.

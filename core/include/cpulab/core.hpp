@@ -8,6 +8,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cpulab {
@@ -66,6 +67,13 @@ struct Configuration {
 };
 
 struct Event {
+  Event() = default;
+  Event(std::string eventType, uint64_t eventCycle, std::string eventStage,
+        std::vector<uint64_t> ids, int eventReg, std::string eventSource,
+        std::string eventMessage)
+      : type(std::move(eventType)), cycle(eventCycle), stage(std::move(eventStage)),
+        instructionIds(std::move(ids)), reg(eventReg), source(std::move(eventSource)),
+        message(std::move(eventMessage)) {}
   std::string type;
   uint64_t cycle{0};
   std::string stage;
@@ -73,6 +81,11 @@ struct Event {
   int reg{-1};
   std::string source;
   std::string message;
+  std::string watchpointKind;
+  std::string access;
+  int64_t address{-1};
+  uint32_t oldValue{0};
+  uint32_t newValue{0};
 };
 
 struct PipelineSlot {
@@ -163,13 +176,17 @@ class Simulator {
   std::string getState() const;
   std::string getEvents() const;
   std::string getTimeline() const;
+  std::string getHistory() const;
   std::string compareReference() const;
   std::string getInitialState() const;
   void setBreakpoint(uint32_t address, bool enabled = true);
+  bool setRegisterWatchpoint(uint32_t index, bool enabled = true);
+  bool setMemoryWatchpoint(uint32_t address, bool enabled = true);
   void setRegister(uint32_t index, uint32_t value);
   std::string readMemory(uint32_t address, uint32_t length) const;
   bool writeMemory(uint32_t address, const std::string& csvBytes);
   bool restorePreviousCycle();
+  bool restoreCycle(uint64_t cycle);
   bool isHalted() const { return halted_; }
   const std::array<uint32_t,32>& registers() const { return regs_; }
   const std::vector<uint8_t>& memory() const { return memory_; }
@@ -186,7 +203,7 @@ class Simulator {
     uint32_t pc{0}; uint64_t nextId{1};
     PipelineSlot ifid,idex,exmem1,mem1mem2,mem2wb;
     Statistics stats{}; BranchPredictor predictor; DataCache cache;
-    bool halted{false}, fetchStopped{false}, faulted{false};
+    bool halted{false}, fetchStopped{false}, faulted{false}, watchpointHit{false};
     bool referenceComparable{true};
     std::string status; uint32_t memWait{0}; bool memAccessStarted{false};
     size_t timelineSize{0};
@@ -204,6 +221,7 @@ class Simulator {
   PipelineSlot ifid_{},idex_{},exmem1_{},mem1mem2_{},mem2wb_{};
   Statistics stats_{}; BranchPredictor predictor_{}; DataCache cache_{};
   bool halted_{false}, fetchStopped_{false}, faulted_{false};
+  bool watchpointHit_{false};
   bool referenceComparable_{true};
   std::string status_{"ready"};
   uint32_t memWait_{0}; bool memAccessStarted_{false};
@@ -211,6 +229,8 @@ class Simulator {
   std::deque<TimelineFrame> timeline_;
   std::deque<Snapshot> history_;
   std::set<uint32_t> breakpoints_;
+  std::set<uint32_t> registerWatchpoints_;
+  std::set<uint32_t> memoryWatchpoints_;
   bool batchRunning_{false};
   bool skipSnapshots_{false};
 

@@ -35,6 +35,12 @@ Without the cache, every memory instruction uses MEM1 and MEM2 and never adds a 
 
 The optional cache is write-back and write-allocate. An access selects a set by block number, matches tags across ways, and uses the smallest LRU counter as victim. A dirty victim writes its block to backing memory before fill. `hitLatency - 1` or `hitLatency + missPenalty - 1` extra cycles are reflected as memory stalls.
 
+## Debug stops and history
+
+Register watchpoints observe committed writes in WB. Exact aligned word-store watchpoints observe committed `SW` side effects in MEM2 after bounds/alignment validation and after the store is visible through coherent inspection. They do not observe loads, cache writebacks, forwarding, squashed instructions, or inspector edits. All stage activity in a cycle commits before execution controls return a watchpoint stop, so debugger configuration never adds a processor cycle.
+
+Interactive execution stores the state immediately before each cycle, up to 500 snapshots. A restore target is validated before mutation and restored through the same one-cycle undo path, including any timeline frame displaced at the 1,000-frame limit. Bulk execution intentionally disables snapshots but still records timeline frames; those cycles are inspectable but not rewindable.
+
 The UI and JSON API accept only validated geometry: power-of-two capacity, block size, and associativity; at least one whole set; block sizes large enough for an aligned word; and bounded positive hit/miss timing. Exact ranges and presets are documented in [configuration.md](configuration.md).
 
 ## HALT and counters

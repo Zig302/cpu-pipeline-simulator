@@ -93,7 +93,7 @@ test("workbench controls, dialogs, responsive density, and continuous execution"
   const errors = watchRuntimeErrors(page);
   await boot(page);
   await expect(page.locator(".stage-card")).toHaveCount(6);
-  await expect(page.getByRole("tab")).toHaveCount(7);
+  await expect(page.getByRole("tab")).toHaveCount(8);
   await expect(page.getByRole("heading", { name: "Pipeline timeline" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Active datapath" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Explanation" })).toBeVisible();
@@ -196,7 +196,7 @@ test("hazards, forwarding, branch recovery, manual mode, cache, and every inspec
   await expect(page.locator(".mini-stats")).toContainText("Hit rate");
   await expect(page.locator(".cache-set > div.valid")).not.toHaveCount(0);
 
-  for (const inspector of ["Registers", "Memory", "Pipeline regs", "Predictor", "Cache", "Statistics", "Event log"]) {
+  for (const inspector of ["Registers", "Memory", "Pipeline regs", "Debugger", "Predictor", "Cache", "Statistics", "Event log"]) {
     await selectInspector(page, inspector);
     await expect(page.locator("#inspector-panel")).toBeVisible();
   }
@@ -303,7 +303,7 @@ test("assembler errors, dirty-source safety, breakpoints, memory edits while pau
 
   await loadExample(page, "arithmetic");
   await page.locator('.gutter button[title="Toggle breakpoint on source line 3"]').click();
-  await moreAction(page, "Run to breakpoint");
+  await moreAction(page, "Run to debug stop");
   await expect(page.locator(".status-pill")).toContainText("breakpoint");
   await page.getByRole("button", { name: "Step cycle" }).click();
   await setMemoryWord(page, 0x500, 0x12345678);
@@ -328,7 +328,7 @@ test("project persistence, downloads, learning center, ISA search, and Performan
   await page.locator(".more-controls button").filter({ hasText: "Download project" }).click();
   const projectDocument = JSON.parse(await readDownload(await projectDownloadPromise));
   expect(projectDocument.format).toBe("pipeline-lab-project");
-  expect(projectDocument.version).toBe(2);
+  expect(projectDocument.version).toBe(3);
   expect(projectDocument.configuration).toMatchObject({ predictorEntries: 16, cacheCapacity: 256, cacheBlockSize: 16, cacheAssociativity: 2, cacheHitLatency: 1, cacheMissPenalty: 8 });
   expect(projectDocument.name).toBe("E2E portfolio lab");
 
@@ -338,7 +338,7 @@ test("project persistence, downloads, learning center, ISA search, and Performan
   await page.locator(".more-controls button").filter({ hasText: "Export execution trace" }).click();
   const traceDocument = JSON.parse(await readDownload(await traceDownloadPromise));
   expect(traceDocument.format).toBe("pipeline-lab-trace");
-  expect(traceDocument.version).toBe(2);
+  expect(traceDocument.version).toBe(3);
   expect(traceDocument.timeline.length).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "Learn" }).click();
@@ -373,12 +373,34 @@ test("v1.3 boundary configuration, accessible cache controls, reset breakpoints,
   await selectInspector(page,"Predictor");await expect(page.locator(".data-table tbody tr")).toHaveCount(1024);
   await selectInspector(page,"Cache");await expect(page.locator(".cache-preview-note")).toContainText("Showing 512 of 16384 sets");await expect(page.locator(".cache-set")).toHaveCount(512);
 
-  await loadExample(page,"arithmetic");await page.locator('.gutter button[title="Toggle breakpoint on source line 3"]').click();await page.getByRole("button",{name:"Reset",exact:true}).click();await moreAction(page,"Run to breakpoint");await expect(page.locator(".status-pill")).toContainText("breakpoint");
+  await loadExample(page,"arithmetic");await page.locator('.gutter button[title="Toggle breakpoint on source line 3"]').click();await page.getByRole("button",{name:"Reset",exact:true}).click();await moreAction(page,"Run to debug stop");await expect(page.locator(".status-pill")).toContainText("breakpoint");
 
   const v2={format:"pipeline-lab-project",version:2,name:"V2 round trip",source:"LI r1, 1280\nLW r2, 0(r1)\nBEQ r2, r0, zero\nLI r3, 7\nHALT\nzero: LI r3, 9\nHALT\n",configuration:{forwarding:"full",predictor:"two-bit",predictorEntries:16,cacheEnabled:false,cacheCapacity:256,cacheBlockSize:16,cacheAssociativity:2,cacheHitLatency:1,cacheMissPenalty:8},breakpointLines:[]};
   await page.getByLabel("Import Pipeline Lab project").setInputFiles({name:"v2.pipeline.json",mimeType:"application/json",buffer:Buffer.from(JSON.stringify(v2))});await expect(page.getByLabel("Assembly source editor")).toContainText("LI r1, 1280");
   await setMemoryWord(page,1280,5);await page.getByRole("button",{name:"Learn"}).click();const learning=page.getByRole("dialog",{name:"Learn the pipeline by doing"});await learning.getByRole("button",{name:"Performance"}).click();await learning.getByRole("button",{name:"Run benchmark"}).click();await expect(learning.locator(".performance-row")).toHaveCount(4);await expect(learning.locator(".verified")).toHaveCount(4);
   await expect(errors).toEqual([]);
+});
+
+test("v1.4 register watchpoints, explicit rewind, deterministic re-hit, and project v3", async ({ page }) => {
+  const errors=watchRuntimeErrors(page);await boot(page);const cycleMetric=page.locator(".run-status .metric").filter({hasText:"Cycle"}).locator("strong");await page.getByRole("button",{name:"Step cycle"}).click();await page.getByLabel("Selected timeline cycle").fill("0");await page.getByRole("button",{name:"Rewind to C0"}).click();await expect(cycleMetric).toHaveText("0");await page.getByRole("button",{name:"Step cycle"}).click();await expect(cycleMetric).toHaveText("1");
+  await loadExample(page,"arithmetic");await selectInspector(page,"Debugger");
+  await page.getByLabel("Register watchpoint").fill("1");await page.getByRole("button",{name:"Add register watchpoint"}).click();await expect(page.locator(".watchpoint-list")).toContainText("r1");
+  await page.getByRole("button",{name:"Run",exact:true}).click();await expect(page.locator(".status-pill")).toContainText("watchpoint",{timeout:10000});await selectInspector(page,"Event log");await expect(page.locator(".event-list")).toContainText("Register watchpoint hit");
+  const hitCycle=Number(await cycleMetric.textContent());expect(hitCycle).toBeGreaterThan(2);await page.getByRole("button",{name:"Step cycle"}).click();await page.getByLabel("Selected timeline cycle").fill(String(hitCycle));await expect(page.locator(".explanation .current-events")).toContainText("Register watchpoint hit");await page.locator(".explanation .current-events button").filter({hasText:"Register watchpoint hit"}).click();await expect(page.locator(".explanation>p")).toContainText("changed r1 from 0 to 7");
+  await page.getByLabel("Selected timeline cycle").fill("2");await expect(page.locator(".timeline-navigator")).toContainText("REWINDABLE");await page.getByRole("button",{name:"Rewind to C2"}).click();await expect(cycleMetric).toHaveText("2");
+  await page.getByRole("button",{name:"Run",exact:true}).click();await expect(page.locator(".status-pill")).toContainText("watchpoint",{timeout:10000});await expect(cycleMetric).toHaveText(String(hitCycle));
+  await selectInspector(page,"Debugger");await page.getByRole("button",{name:"Remove register watchpoint r1"}).click();
+  await openMore(page);await page.getByLabel("Project name").fill("Debugger round trip");await page.getByLabel("Word-store watchpoint").fill("0x140");await page.getByRole("button",{name:"Add word-store watchpoint"}).click();await page.locator(".more-controls button").filter({hasText:"Save browser draft"}).click();
+  await page.getByRole("button",{name:/Remove word-store watchpoint/}).click();await page.locator(".more-controls button").filter({hasText:"Restore browser draft"}).click();await selectInspector(page,"Debugger");await expect(page.locator(".watchpoint-list")).toContainText("0x00000140");
+  const originalSource=await page.getByLabel("Assembly source editor").inputValue();const invalidV3={format:"pipeline-lab-project",version:3,name:"Invalid debugger project",source:"HALT\n",configuration:{forwarding:"full",predictor:"two-bit",predictorEntries:16,cacheEnabled:false,cacheCapacity:256,cacheBlockSize:16,cacheAssociativity:2,cacheHitLatency:1,cacheMissPenalty:8},breakpointLines:[],registerWatchpoints:[],memoryWatchpoints:[3]};
+  await page.getByLabel("Import Pipeline Lab project").setInputFiles({name:"invalid-v3.pipeline.json",mimeType:"application/json",buffer:Buffer.from(JSON.stringify(invalidV3))});await expect(page.locator(".project-message")).toContainText("memory watchpoints are invalid");expect(await page.getByLabel("Assembly source editor").inputValue()).toBe(originalSource);
+  const liveCycle=await cycleMetric.textContent();const invalidAssembly={...invalidV3,name:"Must not replace project",source:"ADD r1, r2\n",memoryWatchpoints:[]};await page.getByLabel("Import Pipeline Lab project").setInputFiles({name:"invalid-assembly.pipeline.json",mimeType:"application/json",buffer:Buffer.from(JSON.stringify(invalidAssembly))});await expect(page.locator(".project-message")).toContainText("Project assembly rejected");expect(await page.getByLabel("Assembly source editor").inputValue()).toBe(originalSource);await expect(page.getByLabel("Project name")).toHaveValue("Debugger round trip");await expect(cycleMetric).toHaveText(liveCycle??"");await expect(errors).toEqual([]);
+});
+
+test("v1.4 word-store stops and bulk-run timeline frames are inspect-only", async ({ page }) => {
+  const errors=watchRuntimeErrors(page);await boot(page);await loadExample(page,"store-forward");await selectInspector(page,"Debugger");await page.getByLabel("Word-store watchpoint").fill("0x140");await page.getByRole("button",{name:"Add word-store watchpoint"}).click();
+  await moreAction(page,"Run to completion");await expect(page.locator(".status-pill")).toContainText("watchpoint");await selectInspector(page,"Event log");await expect(page.locator(".event-list")).toContainText("Memory watchpoint hit");await selectInspector(page,"Memory");await page.getByLabel("Address").fill("0x140");await expect(page.locator(".hex-dump")).toContainText("2a");
+  await selectInspector(page,"Debugger");await page.getByRole("button",{name:/Remove word-store watchpoint/}).click();await moreAction(page,"Run to completion");await expect(page.locator(".status-pill")).toContainText("halted");await expect(page.locator(".timeline-navigator")).toContainText("no rewind snapshots");await expect(page.locator(".timeline-navigator button")).toBeDisabled();await expect(errors).toEqual([]);
 });
 
 test("infinite execution reaches a visible cycle-limit fault without destabilizing the UI", async ({ page }) => {

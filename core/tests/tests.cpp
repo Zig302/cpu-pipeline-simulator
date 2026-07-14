@@ -90,6 +90,40 @@ int main() {
   test("undo restores registers, cycle and deterministic replay", [] {
     Simulator s;CHECK(s.loadProgram("LI r1,9\nHALT\n"));s.runCycles(7);auto state=s.getState();auto regs=s.registers();auto cycles=s.statistics().cycles;CHECK(s.restorePreviousCycle());s.stepCycle();CHECK(s.registers()==regs);CHECK(s.statistics().cycles==cycles);CHECK(s.getState()==state);
   });
+  test("register watchpoints stop on committed WB writes with structured values", [] {
+    Simulator s;CHECK(s.loadProgram("ADDI r1,r0,5\nADDI r2,r1,1\nHALT\n"));CHECK(!s.setRegisterWatchpoint(0));CHECK(!s.setRegisterWatchpoint(32));CHECK(s.setRegisterWatchpoint(1));CHECK(s.setRegisterWatchpoint(1));
+    s.runCycles(100);const auto state=s.getState();CHECK(s.registers()[1]==5);CHECK(!s.isHalted());CHECK(state.find("\"status\":\"watchpoint\"")!=std::string::npos);CHECK(state.find("\"watchpointKind\":\"register\"")!=std::string::npos);CHECK(state.find("\"stage\":\"WB\"")!=std::string::npos);CHECK(state.find("\"oldValue\":0,\"newValue\":5")!=std::string::npos);CHECK(s.getTimeline().find("\"type\":\"watchpoint\"")!=std::string::npos);
+    CHECK(s.setRegisterWatchpoint(1,false));s.runUntilCompletion();CHECK(s.isHalted());
+  });
+  test("word-store watchpoints stop in MEM2 and ignore debugger edits", [] {
+    Simulator s;CHECK(s.loadProgram("LI r1,1024\nLI r2,42\nSW r2,0(r1)\nHALT\n"));CHECK(!s.setMemoryWatchpoint(1025));CHECK(!s.setMemoryWatchpoint(uint32_t(s.memory().size())));CHECK(s.setMemoryWatchpoint(1024));
+    CHECK(s.writeMemory(1024,"7,0,0,0"));CHECK(s.getState().find("\"status\":\"watchpoint\"")==std::string::npos);s.runUntilCompletion();const auto state=s.getState();CHECK(state.find("\"status\":\"watchpoint\"")!=std::string::npos);CHECK(state.find("\"watchpointKind\":\"memory\"")!=std::string::npos);CHECK(state.find("\"access\":\"write\"")!=std::string::npos);CHECK(state.find("\"address\":1024,\"oldValue\":7,\"newValue\":42")!=std::string::npos);CHECK(s.readMemory(1024,4)=="[42,0,0,0]");
+    s.runUntilCompletion();CHECK(s.isHalted());
+  });
+  test("cached store watchpoints fire once after miss service", [] {
+    Simulator s;CHECK(s.loadProgram("LI r1,1024\nLI r2,99\nSW r2,0(r1)\nHALT\n"));CHECK(s.applyConfigurationJson("{\"cacheEnabled\":true,\"cacheMissPenalty\":8}").find("\"ok\":true")!=std::string::npos);CHECK(s.setMemoryWatchpoint(1024));s.runCycles(100);
+    const auto state=s.getState();CHECK(state.find("\"status\":\"watchpoint\"")!=std::string::npos);CHECK(state.find("\"newValue\":99")!=std::string::npos);CHECK(s.statistics().memoryStallCycles>0);CHECK(s.statistics().memoryWrites==1);CHECK(s.readMemory(1024,4)=="[99,0,0,0]");
+  });
+  test("watchpoint definitions are bounded, persistent, and emit simultaneous hits in order", [] {
+    Simulator definitions;CHECK(definitions.loadProgram("HALT\n"));for(uint32_t a=0;a<256;a+=4)CHECK(definitions.setMemoryWatchpoint(a));CHECK(!definitions.setMemoryWatchpoint(256));CHECK(definitions.setMemoryWatchpoint(0,false));CHECK(definitions.setMemoryWatchpoint(256));CHECK(definitions.setRegisterWatchpoint(7));definitions.reset();const auto persisted=definitions.getState();CHECK(persisted.find("\"registerWatchpoints\":[7]")!=std::string::npos);CHECK(persisted.find("\"memoryWatchpoints\":[4,8")!=std::string::npos);
+    Simulator simultaneous;CHECK(simultaneous.loadProgram("ADDI r7,r0,5\nSW r0,1024(r0)\nHALT\n"));CHECK(simultaneous.setRegisterWatchpoint(7));CHECK(simultaneous.setMemoryWatchpoint(1024));simultaneous.runCycles(100);const auto events=simultaneous.getEvents();const auto reg=events.find("\"watchpointKind\":\"register\"");const auto mem=events.find("\"watchpointKind\":\"memory\"");CHECK(reg!=std::string::npos&&mem!=std::string::npos&&reg<mem);CHECK(events.find("\"oldValue\":0,\"newValue\":0",mem)!=std::string::npos);
+  });
+  test("squashed side effects never trigger watchpoints", [] {
+    Simulator s;CHECK(s.loadProgram("LI r1,1\nBEQ r1,r1,taken\nADDI r7,r0,99\nSW r1,1024(r0)\ntaken: HALT\n"));CHECK(s.applyConfigurationJson("{\"predictor\":\"always-not-taken\"}").find("\"ok\":true")!=std::string::npos);CHECK(s.setRegisterWatchpoint(7));CHECK(s.setMemoryWatchpoint(1024));s.runUntilCompletion();
+    CHECK(s.isHalted());CHECK(s.registers()[7]==0);CHECK(s.readMemory(1024,4)=="[0,0,0,0]");CHECK(s.getState().find("\"type\":\"watchpoint\"")==std::string::npos);
+  });
+  test("watchpoints preserve terminal timing and cycle-limit precedence", [] {
+    Simulator base;CHECK(base.loadProgram("ADDI r1,r0,1\n"));base.runUntilCompletion();const auto cycles=base.statistics().cycles;
+    Simulator watched;CHECK(watched.loadProgram("ADDI r1,r0,1\n"));CHECK(watched.setRegisterWatchpoint(1));watched.runUntilCompletion();CHECK(watched.isHalted());CHECK(watched.statistics().cycles==cycles);CHECK(watched.getState().find("\"status\":\"watchpoint\"")!=std::string::npos);
+    std::string atLimit;for(int i=0;i<9994;++i)atLimit+="NOP\n";atLimit+="ADDI r1,r0,1\nloop: J loop\n";Simulator limited;CHECK(limited.loadProgram(atLimit));CHECK(limited.setRegisterWatchpoint(1));limited.runUntilCompletion();const auto state=limited.getState();CHECK(limited.statistics().cycles==10000);CHECK(state.find("\"status\":\"watchpoint\"")!=std::string::npos);CHECK(state.find("\"faulted\":false")!=std::string::npos);
+  });
+  test("cycle history restores atomically and replays exactly", [] {
+    Simulator s;CHECK(s.loadProgram("LI r1,1\nADDI r1,r1,1\nADDI r2,r1,3\nADDI r3,r2,4\nHALT\n"));s.runCycles(9);const auto expectedState=s.getState(),expectedTimeline=s.getTimeline();CHECK(s.getHistory().find("\"currentCycle\":9")!=std::string::npos);CHECK(!s.restoreCycle(10));CHECK(s.statistics().cycles==9);CHECK(s.restoreCycle(3));CHECK(s.statistics().cycles==3);CHECK(s.getTimeline().find("\"cycle\":4,")==std::string::npos);s.runCycles(6);CHECK(s.getState()==expectedState);CHECK(s.getTimeline()==expectedTimeline);
+  });
+  test("history bounds distinguish rewindable and inspect-only cycles", [] {
+    std::string source;for(int i=0;i<600;++i)source+="NOP\n";source+="HALT\n";Simulator s;CHECK(s.loadProgram(source));s.runCycles(510);const auto history=s.getHistory();CHECK(history.find("\"capacity\":500")!=std::string::npos);CHECK(history.find("\"oldestRewindableCycle\":10")!=std::string::npos);CHECK(!s.restoreCycle(9));CHECK(s.statistics().cycles==510);CHECK(s.restoreCycle(10));CHECK(s.statistics().cycles==10);
+    Simulator bulk;CHECK(bulk.loadProgram("NOP\nHALT\n"));bulk.runUntilCompletion();const auto current=bulk.statistics().cycles;CHECK(bulk.getHistory().find("\"rewindAvailable\":false")!=std::string::npos);CHECK(!bulk.restoreCycle(current-1));CHECK(bulk.statistics().cycles==current);
+  });
   test("ID explanations serialize source usage and register-port values", [] {
     Simulator s;CHECK(s.loadProgram("ADD r2,r1,r1\nHALT\n"));s.setRegister(1,7);s.stepCycle();
     auto state=s.getState();CHECK(state.find("\"stage\":\"ID\"")!=std::string::npos);CHECK(state.find("\"usesRs1\":true")!=std::string::npos);CHECK(state.find("\"usesRs2\":true")!=std::string::npos);CHECK(state.find("\"rs1Value\":7")!=std::string::npos);CHECK(state.find("\"rs2Value\":7")!=std::string::npos);

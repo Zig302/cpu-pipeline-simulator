@@ -16,14 +16,14 @@ Pipeline Lab has separate checks for the native CPU model, the WebAssembly bound
 | `npm run wasm` | Fresh Emscripten build and immutable artifact publication |
 | `npm run verify:wasm` | Artifact integrity and WebAssembly validation |
 | `npm test` | Production frontend build plus Node integration tests |
-| `npm run test:e2e` | Launches Chromium and stress-tests all examples, controls, inspectors, downloads, and deterministic step/undo workflows |
+| `npm run test:e2e` | Launches Chromium through a Windows-safe process-tree orchestrator and stress-tests all examples, controls, inspectors, downloads, debugger stops, and deterministic rewind workflows |
 | `npm run lint` | TypeScript/React lint rules |
 | `npm run typecheck` | TypeScript type checking |
 | `npm run qa:dev` | Starts development, checks app and WASM assets, republishes WASM while serving, and rejects fatal server logs |
 | `npm run qa:prod` | Serves the production Cloudflare output through local Wrangler and checks fingerprinted HTML, JS, CSS, WASM, status codes, and MIME types |
 | `npm run qa:all` | WebAssembly verification, production build/tests, typecheck, lint, both server suites, and the Chromium stress suite |
 
-The native suite covers assembler validation and encoding, all instruction classes, immediate limits, r0, dependency and forwarding cases, load-use and store-data hazards, no-forwarding and manual modes, branch flushing, loops and generated reference-model parity, undo/replay, pipeline fill/drain, predictor transitions, cache eviction/writeback, paused-edit atomicity and cache coherence, complete configuration validation/serialization, rejected-configuration atomicity, legacy defaults, configurable cache timing, delayed-EX operand preservation, deterministic reset, and alignment faults.
+The native suite covers assembler validation and encoding, all instruction classes, immediate limits, r0, dependency and forwarding cases, load-use and store-data hazards, no-forwarding and manual modes, branch flushing, loops and generated reference-model parity, undo/rewind/replay, pipeline fill/drain, predictor transitions, cache eviction/writeback, paused-edit atomicity and cache coherence, watchpoint validation/timing/cache/squash/precedence behavior, bounded history expiration, complete configuration validation/serialization, rejected-configuration atomicity, legacy defaults, configurable cache timing, delayed-EX operand preservation, deterministic reset, and alignment faults.
 
 ## Interactive browser acceptance checklist
 
@@ -45,6 +45,10 @@ Run `npm run dev`, open `http://localhost:3000`, and verify these workflows afte
 14. Attempt a three-entry predictor or inconsistent cache geometry and confirm the core rejects it without changing the running CPU.
 15. Save, reload, update, and delete a named browser preset; import a v1 project and confirm the advanced fields receive documented defaults.
 16. Run **Current + presets** and confirm every configuration is listed, architecturally verified, and fully represented in JSON and CSV exports.
+17. Add an `r1` watchpoint, run Basic arithmetic, confirm the WB stop and old/new values, rewind before the hit, and confirm the same cycle and event reproduce.
+18. Add a word-store watchpoint at `0x140`, run Store-data forwarding, and confirm the MEM2 stop occurs after memory contains 42.
+19. Run a program through the bulk completion control and confirm older timeline frames are labeled inspect-only while state inspectors remain clearly labeled live.
+20. Export/import a v3 project and confirm watchpoints round-trip; import a malformed v3 document and confirm the current source and CPU remain unchanged.
 
 ## Release gate
 

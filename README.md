@@ -4,7 +4,18 @@ Pipeline Lab is a browser-based, cycle-accurate laboratory for a small 32-bit RI
 
 ![Pipeline Lab interface](public/og.png)
 
-## What's new in 1.3
+## What's new in 1.4
+
+- Stop on C++-owned register-write watchpoints in WB or exact aligned word-store watchpoints in MEM2.
+- Inspect structured watchpoint events with dynamic instruction IDs, stage, access kind, address/register, and old/new values.
+- Scrub or jump across the retained timeline, then explicitly rewind to any snapshot-backed cycle and deterministically replay from it.
+- Distinguish rewindable interactive history from inspect-only bulk-run timeline frames without increasing the fixed WebAssembly memory budget.
+- Save debugger metadata in v3 projects while importing v1/v2 projects with empty watchpoint sets.
+- Run Chromium through a deterministic Windows-safe orchestrator that always tears down its complete dev-server process tree.
+
+See the [1.4 release notes](docs/release-notes-1.4.md) and [debugger guide](docs/debugger.md) for stop timing, history limits, migration, and verification.
+
+## Previously in 1.3
 
 - Configure predictor-table entries plus cache capacity, block size, associativity, hit latency, and miss penalty from the workbench.
 - Apply every configuration atomically through C++ validation with actionable error messages and no partial reset.
@@ -41,13 +52,13 @@ See the [1.1 release notes](docs/release-notes-1.1.md) for shortcuts, compatibil
 - Exactly six stages: **IF → ID → EX → MEM1 → MEM2 → WB**.
 - Explicit IF/ID, ID/EX, EX/MEM1, MEM1/MEM2, and MEM2/WB records.
 - Two-pass assembler with labels, comments, signed decimal/hex literals, source mapping, pseudoinstructions, and line-specific errors.
-- Full ISA, non-pipelined reference interpreter, dynamic instruction IDs, deterministic replay, and 500-cycle undo.
+- Full ISA, non-pipelined reference interpreter, dynamic instruction IDs, deterministic replay, 500-cycle undo, and selected-cycle rewind.
 - Full forwarding, no-forwarding interlocks, and intentionally unsafe manual scheduling mode.
 - EX-resolved control flow with always-taken, always-not-taken, one-bit, and two-bit predictors.
 - Optional set-associative LRU, write-back, write-allocate data cache with validated geometry and timing controls in both the C++ API and UI.
-- Structured C++ events for stalls, bubbles, forwarding, cache misses, flushes, writes, faults, predictor updates, and HALT.
+- Structured C++ events for stalls, bubbles, forwarding, cache misses, flushes, watchpoints, writes, faults, predictor updates, and HALT.
 - Assembly editor with highlighting, breakpoint/current-PC gutter, six-stage cards, timeline, datapath, state inspectors, event explanations, configuration controls, and 12 teaching examples.
-- Versioned project import/export, browser-local drafts, and complete JSON execution traces.
+- Versioned project import/export with debugger metadata, browser-local drafts, and complete JSON execution traces.
 - Guided checkpoint labs, searchable ISA help, C++ reference-result diagnostics, named microarchitecture presets, and a custom multi-configuration Performance Lab.
 - Keyboard navigation, visible focus, reduced-motion handling, accessible tabs/dialogs, and comfortable/compact display densities.
 
@@ -61,7 +72,7 @@ React controls ──JSON/Embind──> C++ six-stage engine
        └──── state / events / timeline ────┘
 ```
 
-The native and WebAssembly builds compile `core/src/core.cpp`. TypeScript only owns presentation, timers, and user interaction. See [architecture.md](docs/architecture.md), [configuration.md](docs/configuration.md), [isa.md](docs/isa.md), [pipeline-semantics.md](docs/pipeline-semantics.md), [browser support](docs/browser-support.md), and the [1.3 release notes](docs/release-notes-1.3.md).
+The native and WebAssembly builds compile `core/src/core.cpp`. TypeScript only owns presentation, timers, and user interaction. See [architecture.md](docs/architecture.md), [configuration.md](docs/configuration.md), [debugger.md](docs/debugger.md), [isa.md](docs/isa.md), [pipeline-semantics.md](docs/pipeline-semantics.md), [browser support](docs/browser-support.md), and the [1.4 release notes](docs/release-notes-1.4.md).
 
 ## Quick start
 
@@ -174,6 +185,7 @@ tests/e2e/            Full Chromium interaction and deterministic replay suite
 
 - The simulator models one optional data cache; instruction-cache and shared-bus contention are not implemented yet.
 - Presets saved through the UI are browser-local preferences. Portable project files contain the active configuration but not the complete local preset library.
-- Undo retains 500 pre-cycle snapshots. Long timeline history remains visible for the current run, while the UI renders the most recent 40 dynamic instructions and 28 cycles at once.
+- Interactive execution retains 500 pre-cycle snapshots. Bulk runs intentionally retain inspect-only timeline frames; the scrubber centers a 28-cycle DOM window on any selected retained cycle.
+- v1.4 word-store watchpoints match exact aligned 32-bit `SW` start addresses and writes only; byte-range and load watchpoints are not implemented yet.
 - Memory edits are byte/word oriented; there is no file import/export yet.
 - The optional datapath is an educational block diagram, not an RTL schematic.

@@ -1,7 +1,7 @@
 {
-  "build": "12c7e7e26dfd0611",
-  "js": "cpu_core.12c7e7e26dfd0611.js",
-  "wasm": "cpu_core.12c7e7e26dfd0611.wasm",
-  "jsSha256": "2159b580bea938d5a8ab8f844fe73c7989ac295bab98cb8bb95dac22cd20d9e4",
-  "wasmSha256": "adfafabb7979a4b70e245fdfe533ba982416517e95ec526148174036be56193c"
+  "build": "a98ebbc278a78ab5",
+  "js": "cpu_core.a98ebbc278a78ab5.js",
+  "wasm": "cpu_core.a98ebbc278a78ab5.wasm",
+  "jsSha256": "3574e570623eebee92d97e42e44138754ea1675f8761125cb69f98bb1bb455bb",
+  "wasmSha256": "4639399c4eeec8e37c0ea87f9462323c7569223a4667183f115febdb1cc8367e"
 }

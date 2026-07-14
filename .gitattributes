@@ -2,5 +2,5 @@
 
 *.png binary
 *.wasm binary
-frontend/src/generated/cpu_core.*.js linguist-generated=true
+frontend/src/generated/cpu_core.*.js linguist-generated=true whitespace=-trailing-space
 frontend/src/generated/cpu_core.*.wasm linguist-generated=true

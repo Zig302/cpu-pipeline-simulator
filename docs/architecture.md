@@ -2,7 +2,7 @@
 
 ## Boundaries
 
-`cpulab_core` is a freestanding C++20 library. It owns assembly, decoding, the program image, register and memory state, all five inter-stage latches, the predictor, the cache, statistics, events, timeline records, snapshots, breakpoints, and faults.
+`cpulab_core` is a freestanding C++20 library. It owns assembly, decoding, the program image, register and memory state, all five inter-stage latches, the predictor, the cache, statistics, events, timeline records, snapshots, breakpoints, watchpoints, and faults.
 
 The Embind layer exposes value-oriented operations returning JSON strings. No C++ pointer crosses the boundary. `frontend/src/types.ts` documents the serialized contract. React may schedule calls and render results but never calculates a CPU result.
 
@@ -23,8 +23,8 @@ The browser module uses a fixed 128 MiB WebAssembly memory. This avoids resizabl
 
 At the beginning of a cycle the simulator snapshots state. WB commits, MEM2 completes the older data operation, MEM1 applies any configured cache wait, EX calculates/forwards/resolves control, ID either advances or interlocks, and IF selects the next PC. These computations populate next-state latches. The latches replace current state only after the decisions are complete.
 
-Runtime faults set a sticky `faulted` state and stop fetch. Events are structured records containing type, cycle, stage, dynamic instruction IDs, optional register/source, and a human explanation.
+Runtime faults set a sticky `faulted` state and stop fetch. Events are structured records containing type, cycle, stage, dynamic instruction IDs, optional register/source, and a human explanation. Watchpoint records additionally carry kind, access, nullable address, and old/new values. Timeline frames serialize their events so an older selected cycle remains explainable.
 
 ## Determinism and undo
 
-There are no clocks, threads, random replacements, or frontend-owned architectural values in the core. Cache LRU uses a deterministic access counter. A snapshot stores architectural state, pipeline latches, predictor/cache, status, statistics, and timeline length. Restoring and replaying the same cycle produces byte-identical state JSON.
+There are no clocks, threads, random replacements, or frontend-owned architectural values in the core. Cache LRU uses a deterministic access counter. A snapshot stores architectural state, pipeline latches, predictor/cache, status, statistics, watchpoint-hit state, and timeline length. `restoreCycle` validates availability before repeatedly applying the one-cycle restore path, which also restores timeline frames dropped at capacity. Restoring and replaying the same cycle produces byte-identical state JSON. Watchpoint definitions are persistent debugger metadata outside snapshots, like PC breakpoints.

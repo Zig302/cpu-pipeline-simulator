@@ -41,5 +41,6 @@ if(EMSCRIPTEN OR CPULAB_BUILD_WASM)
     "-sALLOW_MEMORY_GROWTH=0"
     "-sINITIAL_MEMORY=134217728"
     "-sENVIRONMENT=web"
+    "-sINCOMING_MODULE_JS_API=['locateFile','wasmBinary']"
     "-sFILESYSTEM=0")
 endif()

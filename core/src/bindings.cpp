@@ -21,13 +21,17 @@ EMSCRIPTEN_BINDINGS(cpulab_module) {
     .function("getState", &cpulab::Simulator::getState)
     .function("getEvents", &cpulab::Simulator::getEvents)
     .function("getTimeline", &cpulab::Simulator::getTimeline)
+    .function("getHistory", &cpulab::Simulator::getHistory)
     .function("compareReference", &cpulab::Simulator::compareReference)
     .function("getInitialState", &cpulab::Simulator::getInitialState)
     .function("setBreakpoint", &cpulab::Simulator::setBreakpoint)
+    .function("setRegisterWatchpoint", &cpulab::Simulator::setRegisterWatchpoint)
+    .function("setMemoryWatchpoint", &cpulab::Simulator::setMemoryWatchpoint)
     .function("setRegister", &cpulab::Simulator::setRegister)
     .function("readMemory", &cpulab::Simulator::readMemory)
     .function("writeMemory", &cpulab::Simulator::writeMemory)
     .function("restorePreviousCycle", &cpulab::Simulator::restorePreviousCycle)
+    .function("restoreCycle", &cpulab::Simulator::restoreCycle)
     .function("isHalted", &cpulab::Simulator::isHalted);
 }
 #endif
